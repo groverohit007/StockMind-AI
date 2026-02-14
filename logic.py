@@ -65,9 +65,14 @@ def get_fundamentals(ticker):
     except:
         return {}
 
-# --- 3. ML & TECHNICALS (UPDATED STRATEGY) ---
+# --- 3. ML & TECHNICALS (FIXED) ---
 def train_model(data):
     df = data.copy()
+    
+    # FIX 1: Handle missing Volume (Common in ETFs/ETCs like SGLN)
+    # Instead of dropping rows with no volume, we fill them with 0
+    if 'Volume' in df.columns:
+        df['Volume'] = df['Volume'].fillna(0)
     
     # Standard Indicators
     df['RSI'] = ta.rsi(df['Close'], length=14)
@@ -77,15 +82,32 @@ def train_model(data):
     
     # Target: 1 if Price Rises in the NEXT candle
     df['Target'] = (df['Close'].shift(-1) > df['Close']).astype(int)
+    
+    # FIX 2: Check if we have enough data BEFORE dropping
+    # If data is too short (e.g., new listing), SMA_50 will create NaNs for the whole set
+    if len(df) < 50:
+        return None, [] # Return empty if not enough history
+        
     df.dropna(inplace=True)
     
+    # FIX 3: Final Safety Check - Did dropna() wipe everything?
+    if df.empty:
+        return None, []
+    
     features = ['RSI', 'SMA_20', 'SMA_50', 'ATR', 'Volume']
+    
+    # Verify features exist (in case Volume was dropped entirely)
+    features = [f for f in features if f in df.columns]
     
     # Train
     train_size = int(len(df) * 0.90)
     train = df.iloc[:train_size]
     test = df.iloc[train_size:]
     
+    # Prevent training on tiny datasets
+    if len(train) < 5: 
+        return None, []
+
     model = RandomForestClassifier(n_estimators=100, min_samples_split=10, random_state=42)
     model.fit(train[features], train['Target'])
     
@@ -176,4 +198,5 @@ def remove_from_watchlist(ticker):
                 f.write(f"{t}\n")
         return f"🗑️ {ticker} removed."
     return "⚠️ Ticker not found."
+
 
