@@ -9,7 +9,7 @@ st.set_page_config(layout="wide", page_title="HedgeFund Terminal", page_icon="�
 if 'auth' not in st.session_state: st.session_state['auth'] = False
 if 'pwd' not in st.session_state: st.session_state['pwd'] = "Arabella@30"
 
-# Initialize Session State for Keys (Load from secrets if available)
+# Load Secrets
 if 'openai_key' not in st.session_state: 
     st.session_state['openai_key'] = st.secrets.get("api", {}).get("openai_key", "")
 if 'tele_token' not in st.session_state: 
@@ -31,7 +31,7 @@ if not st.session_state['auth']:
 
 # --- MAIN APP ---
 def main():
-    # SIDEBAR
+    # --- SIDEBAR ---
     st.sidebar.header("🔍 Market Search")
     ticker = "AAPL"
     query = st.sidebar.text_input("Ticker / Company")
@@ -43,11 +43,25 @@ def main():
         if manual: ticker = manual
     
     st.sidebar.markdown("---")
+    
+    # RESTORED: TRADING MODE & INTERVAL
+    st.sidebar.header("⏱️ Timeframe")
+    mode = st.sidebar.radio("Strategy Mode", ["Swing (Daily)", "Day Trading (Intraday)"])
+    
+    # Default interval
+    interval = "1d"
+    if "Day Trading" in mode:
+        interval = st.sidebar.selectbox("Select Interval", ["15m", "30m", "1h"])
+        st.sidebar.caption(f"⚡ Live Intraday Mode ({interval})")
+    else:
+        st.sidebar.caption("🐢 Daily Candles (End of Day)")
+
+    st.sidebar.markdown("---")
     st.sidebar.header("💷 Portfolio Settings")
     base_curr = st.sidebar.radio("Your Currency", ["GBP (£)", "USD ($)"])
     capital = st.sidebar.number_input(f"Capital ({base_curr[0]})", 10000)
     
-    # TABS
+    # --- TABS ---
     tabs = st.tabs([
         "📈 Terminal", 
         "🦅 Scanner & Watchdog", 
@@ -60,10 +74,12 @@ def main():
     # --- TAB 1: TERMINAL ---
     with tabs[0]:
         if ticker:
-            st.title(f"{ticker} Pro Analysis")
+            st.title(f"{ticker} Analysis ({interval})")
             
-            with st.spinner("Running Multi-Model Consensus..."):
-                data = logic.get_data(ticker)
+            with st.spinner(f"Running Consensus AI on {interval} data..."):
+                # PASS THE SELECTED INTERVAL TO LOGIC
+                data = logic.get_data(ticker, interval=interval)
+                
                 if data is not None and not data.empty:
                     processed, _, votes = logic.train_consensus_model(data)
                     
@@ -116,9 +132,9 @@ def main():
                                 
                             st.markdown("---")
                             
-                            # Telegram Alert Button (RESTORED)
+                            # Telegram Alert Button
                             if st.button("📱 Send Telegram Alert"):
-                                msg = f"🚀 *{ticker} Analysis*\nSignal: {sig}\nPrice: ${last['Close']:.2f}\nConfidence: {conf*100:.0f}%"
+                                msg = f"🚀 *{ticker} ({interval}) Analysis*\nSignal: {sig}\nPrice: ${last['Close']:.2f}\nConfidence: {conf*100:.0f}%"
                                 res = logic.send_telegram_alert(st.session_state['tele_token'], st.session_state['tele_chat'], msg)
                                 if "✅" in res:
                                     st.success(res)
@@ -126,7 +142,7 @@ def main():
                                     st.error(f"{res} - Check Settings Tab!")
 
                 else:
-                    st.error("Data not available. Try another ticker.")
+                    st.error("Data not available. Try another ticker or a different timeframe.")
 
     # --- TAB 2: SCANNER & WATCHDOG ---
     with tabs[1]:
@@ -174,23 +190,17 @@ def main():
         
         if st.button("Run Backtest Simulation"):
             with st.spinner("Simulating trades..."):
-                # Convert user capital to USD for the test logic
                 rate = logic.get_exchange_rate("GBP") if "GBP" in base_curr else 1.0
                 usd_cap = capital / rate
                 
                 res, trades, ret = logic.run_backtest(ticker, usd_cap)
                 
                 if res is not None:
-                    # Metrics
                     c1, c2, c3 = st.columns(3)
                     c1.metric("Total Return", f"{ret:.2f}%")
                     c2.metric("Final Balance", f"${res['Equity'].iloc[-1]:.2f}")
                     c3.metric("Total Trades", len(trades) if not trades.empty else 0)
-                    
-                    # Equity Curve
                     st.line_chart(res['Equity'])
-                    
-                    # Trade Log
                     st.subheader("Trade Log")
                     st.dataframe(trades)
                 else:
@@ -258,12 +268,11 @@ def main():
         else:
             st.info("No open trades.")
 
-    # --- TAB 6: SETTINGS (RESTORED) ---
+    # --- TAB 6: SETTINGS ---
     with tabs[5]:
         st.header("⚙️ Settings")
         st.info("Keys are loaded from secrets.toml if available. Otherwise, enter them here.")
         
-        # Manual Input Backups (Updates Session State)
         st.session_state['openai_key'] = st.text_input("OpenAI Key", 
             value=st.session_state['openai_key'], type="password")
             
