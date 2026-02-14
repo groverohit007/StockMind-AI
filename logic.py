@@ -188,16 +188,50 @@ def execute_trade(ticker, price_usd, shares, action, currency="USD"):
     df.to_csv(PORTFOLIO_FILE, index=False)
     return "✅ Executed"
 
-# --- 5. ALERTS & AI ---
+# --- 5. ALERTS & AI (FIXED) ---
 def get_ai_analysis(ticker, api_key):
-    if not api_key: return "⚠️ API Key Missing.", []
+    # 1. Check Key
+    if not api_key: 
+        return "⚠️ API Key Missing. Please enter it in the Settings tab.", []
+    
+    # 2. Check Quota (Optional Pre-check logic or just let OpenAI fail)
+    if "sk-" not in api_key:
+        return "⚠️ Invalid API Key format. Must start with 'sk-'.", []
+
     try:
-        headlines = [n['title'] for n in yf.Ticker(ticker).news[:3]]
+        # 3. Robust News Fetching
+        stock = yf.Ticker(ticker)
+        raw_news = stock.news
+        
+        # Yahoo News sometimes hides the title, so we check multiple spots
+        headlines = []
+        if raw_news:
+            for n in raw_news[:3]: # Limit to top 3
+                # Try getting 'title' directly
+                if 'title' in n:
+                    headlines.append(n['title'])
+                # Try getting 'title' inside 'content' (common in new Yahoo API)
+                elif 'content' in n and 'title' in n['content']:
+                    headlines.append(n['content']['title'])
+        
+        # If no news found, don't crash the AI
+        if not headlines:
+            return f"ℹ️ No recent news found for {ticker}. AI cannot run analysis.", []
+
+        # 4. Call OpenAI (Using standard model)
         client = OpenAI(api_key=api_key)
-        prompt = f"Analyze {ticker} based on: {headlines}. Max 50 words. Sentiment?"
-        res = client.chat.completions.create(model="gpt-4o", messages=[{"role":"user","content":prompt}])
-        return res.choices[0].message.content, headlines
-    except: return "AI Error", []
+        prompt = f"Analyze these headlines for {ticker}: {headlines}. Return a 1-sentence summary and a Sentiment (Bullish/Bearish/Neutral)."
+        
+        # Switched to 'gpt-3.5-turbo' for maximum compatibility (gpt-4o sometimes requires special access)
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo", 
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return response.choices[0].message.content, headlines
+
+    except Exception as e:
+        # This will print the EXACT error from OpenAI (e.g., Rate Limit, Quota, etc.)
+        return f"❌ AI Error: {str(e)}", []
 
 def send_telegram_alert(token, chat_id, msg):
     try:
@@ -300,3 +334,4 @@ def run_backtest(ticker, initial_capital=10000):
     total_return = ((final_value - initial_capital) / initial_capital) * 100
     
     return processed, pd.DataFrame(trades), total_return
+
