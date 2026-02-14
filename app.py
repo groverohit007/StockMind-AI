@@ -33,7 +33,7 @@ def main():
     # --- SIDEBAR: SEARCH & MARKETS ---
     st.sidebar.header("🔍 Market Search")
     
-    # NEW: MARKET REGION SELECTOR
+    # MARKET REGION SELECTOR
     market_region = st.sidebar.selectbox("Select Market", 
         ["All", "USA (NASDAQ/NYSE)", "UK (LSE)", "India (NSE/BSE)"])
     
@@ -41,7 +41,6 @@ def main():
     query = st.sidebar.text_input("Ticker / Company")
     
     if query:
-        # Pass the region to search_ticker logic
         res = logic.search_ticker(query, region=market_region)
         if res: ticker = res[st.sidebar.selectbox("Results", list(res.keys()))]
     else:
@@ -102,7 +101,6 @@ def main():
             # TOP ACTION BAR
             c_top1, c_top2 = st.columns([3, 1])
             with c_top2:
-                # NEW: ADD TO WATCHLIST BUTTON
                 if st.button(f"➕ Add {ticker} to Watchlist"):
                     logic.add_to_watchlist(ticker)
                     st.success(f"Added {ticker} to Watchdog!")
@@ -113,7 +111,7 @@ def main():
                 if data is not None and not data.empty:
                     # 1. Technicals
                     data = logic.add_technical_overlays(data)
-                    # 2. AI Short Term
+                    # 2. AI Short Term (Robust)
                     processed, _, votes = logic.train_consensus_model(data)
                     # 3. AI Long Term
                     long_term_preds = logic.predict_long_term_trends(data)
@@ -288,14 +286,50 @@ def main():
             
             st.metric("Total Value", f"{base_curr[0]}{total_val:.2f}")
             
+            # --- NEW: VALUE AT RISK & OPTIMIZER ---
             st.markdown("---")
-            st.subheader("⚠️ Correlation Risk Matrix")
+            st.subheader("📊 Risk & Optimization")
+            
+            # 1. VaR Display
+            var_val = logic.calculate_portfolio_var(open_pos) * rate
+            st.warning(f"⚠️ **Value at Risk (Daily 95%):** {base_curr[0]}{var_val:.2f}")
+            st.caption("You have a 95% confidence that you will not lose more than this amount in a single day.")
+
+            # 2. Correlation Matrix
+            st.markdown("---")
+            st.subheader("🔗 Correlation Matrix")
             corr = logic.get_correlation_matrix(open_pos)
             if corr is not None:
                 fig = go.Figure(data=go.Heatmap(z=corr.values, x=corr.columns, y=corr.columns, colorscale='RdBu_r', zmin=-1, zmax=1))
                 fig.update_layout(height=400)
                 st.plotly_chart(fig, use_container_width=True)
             else: st.info("Add 2+ stocks to see correlation.")
+            
+            # 3. Portfolio Optimizer (Markowitz)
+            st.markdown("---")
+            st.subheader("⚖️ AI Portfolio Optimizer")
+            st.caption("Uses Modern Portfolio Theory (Markowitz) to find the mathematically safest allocation.")
+            
+            if len(open_pos['Ticker'].unique()) >= 2:
+                if st.button("Run Optimizer"):
+                    with st.spinner("Calculating Efficient Frontier..."):
+                        optimal_weights = logic.optimize_portfolio(open_pos['Ticker'].unique().tolist())
+                        
+                        if optimal_weights:
+                            st.success("Optimization Complete! Recommended Allocation:")
+                            
+                            opt_df = pd.DataFrame(list(optimal_weights.items()), columns=["Ticker", "Ideal Weight"])
+                            opt_df['Ideal Weight'] = opt_df['Ideal Weight'].apply(lambda x: f"{x*100:.1f}%")
+                            
+                            c1, c2 = st.columns(2)
+                            c1.dataframe(opt_df)
+                            
+                            fig_pie = go.Figure(data=[go.Pie(labels=list(optimal_weights.keys()), values=list(optimal_weights.values()), hole=.3)])
+                            fig_pie.update_layout(height=300, margin=dict(t=0, b=0, l=0, r=0))
+                            c2.plotly_chart(fig_pie, use_container_width=True)
+            else:
+                st.info("You need at least 2 active stocks to run the optimizer.")
+
         else: st.info("No active trades.")
 
     # --- TAB 6: SETTINGS ---
