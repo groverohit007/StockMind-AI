@@ -197,3 +197,49 @@ def send_telegram_alert(token, chat_id, msg):
         requests.get(f"https://api.telegram.org/bot{token}/sendMessage", params={"chat_id": chat_id, "text": msg})
         return "✅ Sent"
     except: return "❌ Failed"
+
+# --- 8. MARKET SCANNER ---
+def scan_market():
+    """
+    Loops through the entire Watchlist, analyzes each stock,
+    and returns a ranked DataFrame of the best opportunities.
+    """
+    tickers = get_watchlist()
+    if not tickers: return pd.DataFrame()
+    
+    results = []
+    
+    for ticker in tickers:
+        try:
+            # Get Data (Fast mode: 1y history is enough for scanning)
+            data = get_data(ticker, period="1y")
+            
+            if data is not None and not data.empty:
+                # Run the AI
+                processed, _, votes = train_consensus_model(data)
+                
+                if processed is not None:
+                    last_row = processed.iloc[-1]
+                    conf = last_row['Confidence']
+                    
+                    # Determine Signal
+                    signal = "WAIT"
+                    if conf > 0.6: signal = "BUY 🟢"
+                    elif conf < 0.4: signal = "SELL 🔴"
+                    
+                    results.append({
+                        "Ticker": ticker,
+                        "Price": last_row['Close'],
+                        "Signal": signal,
+                        "Confidence": conf,
+                        "RSI": last_row['RSI'],
+                        "Trend": "Up 📈" if last_row['Close'] > last_row['SMA_50'] else "Down 📉"
+                    })
+        except:
+            continue # Skip bad tickers
+            
+    # Convert to DataFrame and Sort by Confidence (Highest first)
+    df = pd.DataFrame(results)
+    if not df.empty:
+        df = df.sort_values(by="Confidence", ascending=False)
+    return df
