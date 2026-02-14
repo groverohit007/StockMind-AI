@@ -2,12 +2,13 @@ import yfinance as yf
 import pandas as pd
 import pandas_ta as ta
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
+from sklearn.linear_model import LogisticRegression
 from openai import OpenAI
 import requests
 import os
 
-# --- 1. SMART TICKER SEARCH ---
+# --- 1. DATA & SEARCH ---
 def search_ticker(query):
     try:
         url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=10&newsCount=0"
@@ -26,15 +27,10 @@ def search_ticker(query):
     except:
         return {}
 
-# --- 2. DATA ACQUISITION ---
 def get_data(ticker, period="2y", interval="1d"):
     try:
-        # Day trading requires fetching data differently
-        if interval in ['15m', '30m', '60m', '1h']:
-            period = "1mo"
-        
+        if interval in ['15m', '30m', '60m', '1h']: period = "1mo"
         data = yf.download(ticker, period=period, interval=interval, progress=False)
-        
         if data.empty: return None
         if isinstance(data.columns, pd.MultiIndex):
             data.columns = data.columns.get_level_values(0)
@@ -42,134 +38,162 @@ def get_data(ticker, period="2y", interval="1d"):
     except:
         return None
 
-def get_market_status():
-    spy = get_data("SPY", period="1y", interval="1d")
-    if spy is None: return "Unknown"
-    spy['SMA_200'] = ta.sma(spy['Close'], length=200)
-    current = spy['Close'].iloc[-1]
-    sma = spy['SMA_200'].iloc[-1]
-    return "Bullish 🐂" if current > sma else "Bearish 🐻"
-
-def get_fundamentals(ticker):
-    try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
-        return {
-            "Market Cap": info.get('marketCap', 'N/A'),
-            "P/E Ratio": info.get('trailingPE', 'N/A'),
-            "Beta": info.get('beta', 'N/A'),
-            "Vol (10Day)": info.get('averageVolume10days', 'N/A')
-        }
-    except:
-        return {}
-
-# --- 3. ML & TECHNICALS (FIXED FOR SGLN/ETFs) ---
-def train_model(data):
+# --- 2. MULTI-MODEL CONSENSUS AI ---
+def train_consensus_model(data):
+    """
+    Trains 3 models (Random Forest, XGBoost, LogReg) and takes a vote.
+    """
     df = data.copy()
-    
-    # FIX: Fill missing volume with 0 to prevent dropna() from deleting everything
-    if 'Volume' in df.columns:
-        df['Volume'] = df['Volume'].fillna(0)
+    if 'Volume' in df.columns: df['Volume'] = df['Volume'].fillna(0)
     
     # Indicators
     df['RSI'] = ta.rsi(df['Close'], length=14)
     df['SMA_20'] = ta.sma(df['Close'], length=20)
     df['SMA_50'] = ta.sma(df['Close'], length=50)
     df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
-    
     df['Target'] = (df['Close'].shift(-1) > df['Close']).astype(int)
     
-    # FIX: Safety check before dropping
-    if len(df) < 50: return None, []
-    
+    if len(df) < 50: return None, [], {}
     df.dropna(inplace=True)
-    
-    # FIX: Final Empty Check
-    if df.empty: return None, []
+    if df.empty: return None, [], {}
     
     features = ['RSI', 'SMA_20', 'SMA_50', 'ATR', 'Volume']
-    features = [f for f in features if f in df.columns] # Only use existing columns
+    features = [f for f in features if f in df.columns]
     
     train_size = int(len(df) * 0.90)
     train = df.iloc[:train_size]
     test = df.iloc[train_size:]
     
-    if len(train) < 10: return None, []
+    # 1. Define the 3 Models
+    rf = RandomForestClassifier(n_estimators=100, min_samples_split=10, random_state=42)
+    gb = GradientBoostingClassifier(n_estimators=100, learning_rate=0.1, max_depth=3, random_state=42)
+    lr = LogisticRegression(solver='liblinear')
     
-    model = RandomForestClassifier(n_estimators=100, min_samples_split=10, random_state=42)
-    model.fit(train[features], train['Target'])
+    # 2. Create Voting Consensus (Soft Vote = Average Probability)
+    ensemble = VotingClassifier(estimators=[('RF', rf), ('GB', gb), ('LR', lr)], voting='soft')
+    ensemble.fit(train[features], train['Target'])
     
-    probs = model.predict_proba(test[features])[:, 1]
+    # 3. Predict
+    probs = ensemble.predict_proba(test[features])[:, 1]
     test = test.copy()
     test['Confidence'] = probs
     
-    return test, features
-
-# --- 4. CALCULATORS ---
-def calculate_position_size(account_size, risk_pct, current_price, atr):
-    if atr == 0: return 0, 0
-    risk_amount = account_size * (risk_pct / 100)
-    stop_loss_dist = 1.5 * atr
-    shares = int(risk_amount / stop_loss_dist)
-    return shares, stop_loss_dist
-
-# --- 5. AI NEWS ANALYSIS (FIXED) ---
-def get_ai_analysis(ticker, api_key):
-    if not api_key: return "⚠️ API Key Missing in Settings.", []
+    # Get individual votes for the "Details" view
+    rf.fit(train[features], train['Target'])
+    gb.fit(train[features], train['Target'])
+    lr.fit(train[features], train['Target'])
     
-    try:
-        stock = yf.Ticker(ticker)
-        raw_news = stock.news[:3]
-        headlines = []
-        for n in raw_news:
-            if 'title' in n: headlines.append(n['title'])
-            elif 'content' in n and 'title' in n['content']: headlines.append(n['content']['title'])
-        
-        if not headlines: return "No recent news found.", []
+    last_row = test.iloc[[-1]]
+    votes = {
+        "Random Forest": rf.predict_proba(last_row[features])[:, 1][0],
+        "Gradient Boost": gb.predict_proba(last_row[features])[:, 1][0],
+        "Logistic Reg": lr.predict_proba(last_row[features])[:, 1][0]
+    }
+    
+    return test, features, votes
 
-        client = OpenAI(api_key=api_key)
-        prompt = f"Analyze these headlines for {ticker}: {headlines}. Return: Sentiment (Bullish/Bearish) & 1 sentence summary."
-        
-        response = client.chat.completions.create(
-            model="gpt-4o", messages=[{"role": "user", "content": prompt}]
-        )
-        return response.choices[0].message.content, headlines
-    except Exception as e:
-        return f"AI Error: {e}", []
+# --- 3. MACRO & SECTORS ---
+def get_macro_data():
+    """Fetches key economic indicators."""
+    tickers = {
+        "🇺🇸 10Y Yield": "^TNX",
+        "💵 Dollar Index": "DX-Y.NYB",
+        "🎢 VIX (Fear)": "^VIX",
+        "🛢️ Oil": "CL=F",
+        "🏆 Gold": "GC=F",
+        "🇬🇧 FTSE 100": "^FTSE"
+    }
+    data = {}
+    for name, sym in tickers.items():
+        try:
+            d = yf.Ticker(sym).history(period="5d")
+            if not d.empty:
+                change = ((d['Close'].iloc[-1] - d['Close'].iloc[-2]) / d['Close'].iloc[-2]) * 100
+                data[name] = {"Price": d['Close'].iloc[-1], "Change": change}
+        except:
+            pass
+    return data
 
-def send_telegram_alert(token, chat_id, ticker, signal, price, timeframe):
-    if not token or not chat_id: return "⚠️ Telegram details missing."
-    msg = f"🚀 *{ticker} ({timeframe}) Alert*\nSignal: {signal}\nPrice: ${price:.2f}"
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
+def get_sector_heatmap():
+    """Fetches performance of major US Sector ETFs."""
+    sectors = {
+        "Tech": "XLK", "Finance": "XLF", "Health": "XLV", "Energy": "XLE",
+        "Consumer": "XLY", "Staples": "XLP", "Industrial": "XLI", "Comms": "XLC",
+        "Materials": "XLB", "Utilities": "XLU", "Real Estate": "XLRE"
+    }
+    performance = {}
+    for name, tick in sectors.items():
+        try:
+            d = yf.Ticker(tick).history(period="2d")
+            if len(d) >= 2:
+                change = ((d['Close'].iloc[-1] - d['Close'].iloc[-2]) / d['Close'].iloc[-2]) * 100
+                performance[name] = change
+            else:
+                performance[name] = 0.0
+        except:
+            performance[name] = 0.0
+    return performance
+
+# --- 4. MULTI-CURRENCY PORTFOLIO ---
+PORTFOLIO_FILE = "portfolio.csv"
+
+def get_exchange_rate(base_currency="GBP"):
+    """
+    Returns USD to Base Rate. 
+    If Base is GBP, we need USD->GBP rate.
+    Standard pair is GBPUSD=X (1 GBP = x USD). So USD->GBP is 1/Rate.
+    """
+    if base_currency == "USD": return 1.0
     try:
-        requests.get(url, params={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"})
-        return "✅ Alert Sent!"
+        # Get GBPUSD
+        pair = f"{base_currency}USD=X" # e.g., GBPUSD=X
+        d = yf.Ticker(pair).history(period="1d")
+        if not d.empty:
+            rate = d['Close'].iloc[-1] # This is 1 GBP = 1.27 USD
+            return 1.0 / rate # Returns 0.78 (1 USD = 0.78 GBP)
     except:
-        return "❌ Failed."
+        return 0.78 # Fallback avg
+    return 1.0
 
-# --- 6. WATCHLIST MANAGER ---
-WATCHLIST_FILE = "watchlist.txt"
+def get_portfolio():
+    if os.path.exists(PORTFOLIO_FILE):
+        return pd.read_csv(PORTFOLIO_FILE)
+    return pd.DataFrame(columns=["Ticker", "Buy_Price_USD", "Shares", "Date", "Status", "Currency"])
 
-def get_watchlist():
+def execute_trade(ticker, price_usd, shares, action, currency="USD"):
+    df = get_portfolio()
+    if action == "BUY":
+        new = pd.DataFrame([{
+            "Ticker": ticker, "Buy_Price_USD": price_usd, "Shares": shares, 
+            "Date": pd.Timestamp.now(), "Status": "OPEN", "Currency": currency
+        }])
+        df = pd.concat([df, new], ignore_index=True)
+    elif action == "SELL":
+        rows = df[(df['Ticker'] == ticker) & (df['Status'] == 'OPEN')]
+        if not rows.empty:
+            idx = rows.index[0]
+            df.at[idx, 'Status'] = 'CLOSED'
+            df.at[idx, 'Sell_Price_USD'] = price_usd
+            # P&L in USD
+            pnl = (price_usd - df.at[idx, 'Buy_Price_USD']) * df.at[idx, 'Shares']
+            df.at[idx, 'Profit_USD'] = pnl
+            
+    df.to_csv(PORTFOLIO_FILE, index=False)
+    return "✅ Executed"
+
+# --- 5. ALERTS & AI ---
+def get_ai_analysis(ticker, api_key):
+    if not api_key: return "⚠️ API Key Missing.", []
     try:
-        with open(WATCHLIST_FILE, "r") as f:
-            return [line.strip() for line in f.readlines() if line.strip()]
-    except FileNotFoundError:
-        return []
+        headlines = [n['title'] for n in yf.Ticker(ticker).news[:3]]
+        client = OpenAI(api_key=api_key)
+        prompt = f"Analyze {ticker} based on: {headlines}. Max 50 words. Sentiment?"
+        res = client.chat.completions.create(model="gpt-4o", messages=[{"role":"user","content":prompt}])
+        return res.choices[0].message.content, headlines
+    except: return "AI Error", []
 
-def add_to_watchlist(ticker):
-    current = get_watchlist()
-    if ticker not in current:
-        with open(WATCHLIST_FILE, "a") as f:
-            f.write(f"{ticker}\n")
-        return f"✅ {ticker} added."
-    return f"⚠️ {ticker} exists."
-
-def remove_from_watchlist(ticker):
-    current = get_watchlist()
-    if ticker in current:
-        current.remove(ticker)
-        with open(WATCHLIST_FILE, "w") as f:
-            for t in current: f.write(f"{t}\n")
-        return f"🗑️ {ticker} removed."
-    return "⚠️ Not found."
+def send_telegram_alert(token, chat_id, msg):
+    try:
+        requests.get(f"https://api.telegram.org/bot{token}/sendMessage", params={"chat_id": chat_id, "text": msg})
+        return "✅ Sent"
+    except: return "❌ Failed"
