@@ -9,7 +9,7 @@ st.set_page_config(layout="wide", page_title="HedgeFund Terminal", page_icon="�
 if 'auth' not in st.session_state: st.session_state['auth'] = False
 if 'pwd' not in st.session_state: st.session_state['pwd'] = "Arabella@30"
 
-# Load Secrets
+# Secrets
 if 'openai_key' not in st.session_state: 
     st.session_state['openai_key'] = st.secrets.get("api", {}).get("openai_key", "")
 if 'tele_token' not in st.session_state: 
@@ -29,9 +29,8 @@ if not st.session_state['auth']:
     login()
     st.stop()
 
-# --- MAIN APP ---
 def main():
-    # --- SIDEBAR ---
+    # --- SIDEBAR: SEARCH & FUNDAMENTALS ---
     st.sidebar.header("🔍 Market Search")
     ticker = "AAPL"
     query = st.sidebar.text_input("Ticker / Company")
@@ -41,70 +40,133 @@ def main():
     else:
         manual = st.sidebar.text_input("Or Symbol", "AAPL").upper()
         if manual: ticker = manual
-    
-    st.sidebar.markdown("---")
-    
-    # TIMEFRAME & MODE
-    st.sidebar.header("⏱️ Timeframe")
-    mode = st.sidebar.radio("Strategy Mode", ["Swing (Daily)", "Day Trading (Intraday)"])
-    
-    interval = "1d"
-    if "Day Trading" in mode:
-        interval = st.sidebar.selectbox("Select Interval", ["15m", "30m", "1h"])
-        st.sidebar.caption(f"⚡ Live Intraday Mode ({interval})")
-    else:
-        st.sidebar.caption("🐢 Daily Candles (End of Day)")
+
+    # NEW: FUNDAMENTAL HEALTH CHECK WIDGET
+    if ticker:
+        st.sidebar.markdown("---")
+        st.sidebar.header("🏢 Health Check")
+        fund = logic.get_fundamentals(ticker)
+        if fund:
+            st.sidebar.caption(f"{fund['Industry']} | {fund['Sector']}")
+            
+            # Formatting Market Cap
+            mc = fund['Market Cap']
+            if isinstance(mc, (int, float)):
+                if mc > 1e12: mc_str = f"${mc/1e12:.2f}T"
+                elif mc > 1e9: mc_str = f"${mc/1e9:.2f}B"
+                else: mc_str = f"${mc/1e6:.2f}M"
+            else: mc_str = "N/A"
+            
+            c1, c2 = st.sidebar.columns(2)
+            c1.metric("Mkt Cap", mc_str)
+            c2.metric("Beta", fund['Beta'])
+            
+            c3, c4 = st.sidebar.columns(2)
+            c3.metric("P/E Ratio", f"{fund['P/E Ratio']}")
+            
+            div = fund['Dividend Yield']
+            div_fmt = f"{div*100:.2f}%" if isinstance(div, (int, float)) else "0%"
+            c4.metric("Div Yield", div_fmt)
+            
+            # Health Warning
+            pe = fund['P/E Ratio']
+            if isinstance(pe, (int, float)) and pe > 100:
+                st.sidebar.warning("⚠️ Overvalued? (High P/E)")
+            elif isinstance(pe, (int, float)) and pe < 0:
+                st.sidebar.error("⚠️ Unprofitable (Neg P/E)")
 
     st.sidebar.markdown("---")
-    st.sidebar.header("💷 Portfolio Settings")
-    base_curr = st.sidebar.radio("Your Currency", ["GBP (£)", "USD ($)"])
-    capital = st.sidebar.number_input(f"Capital ({base_curr[0]})", 10000)
-    
-    # --- TABS ---
-    tabs = st.tabs([
-        "📈 Terminal", 
-        "🦅 Scanner & Watchdog", 
-        "🔙 Backtest", 
-        "🌍 Macro & Sectors", 
-        "💼 Multi-Currency Portfolio", 
-        "⚙️ Settings"
-    ])
+    st.sidebar.header("⏱️ Trading Mode")
+    mode = st.sidebar.radio("Strategy", ["Swing (Daily)", "Intraday"])
+    interval = "1d"
+    if mode == "Intraday":
+        interval = st.sidebar.selectbox("Interval", ["15m", "30m", "1h"])
+
+    st.sidebar.header("💷 Settings")
+    base_curr = st.sidebar.radio("Currency", ["GBP (£)", "USD ($)"])
+    capital = st.sidebar.number_input("Capital", 10000)
+
+    # --- MAIN TABS ---
+    tabs = st.tabs(["📈 Terminal", "🦅 Scanner", "🔙 Backtest", "🌍 Macro", "💼 Portfolio", "⚙️ Settings"])
 
     # --- TAB 1: TERMINAL ---
     with tabs[0]:
         if ticker:
-            st.title(f"{ticker} Analysis ({interval})")
+            st.title(f"{ticker} Pro Analysis ({interval})")
             
-            with st.spinner(f"Running Consensus AI on {interval} data..."):
+            with st.spinner("Analyzing Market Data & Training Models..."):
                 data = logic.get_data(ticker, interval=interval)
                 
                 if data is not None and not data.empty:
+                    # 1. Add Technicals for Charting
+                    data = logic.add_technical_overlays(data)
+                    
+                    # 2. Run Main AI (Short Term)
                     processed, _, votes = logic.train_consensus_model(data)
+                    
+                    # 3. Run Multi-Timeframe AI (Long Term) - NEW
+                    long_term_preds = logic.predict_long_term_trends(data)
                     
                     if processed is not None:
                         last = processed.iloc[-1]
                         conf = last['Confidence']
-                        
                         sig = "BUY 🟢" if conf > 0.6 else "SELL 🔴" if conf < 0.4 else "HOLD ⚪"
                         
+                        # --- TOP METRICS ---
                         m1, m2, m3, m4 = st.columns(4)
-                        m1.metric("Price", f"${last['Close']:.2f}")
-                        m2.metric("Consensus Signal", sig)
+                        m1.metric("Current Price", f"${last['Close']:.2f}")
+                        m2.metric("Short-Term Signal", sig)
                         m3.metric("AI Confidence", f"{conf*100:.0f}%")
                         m4.metric("Volatility (ATR)", f"{last['ATR']:.2f}")
                         
-                        # CHART
-                        fig = go.Figure(data=[go.Candlestick(x=processed.index, open=processed['Open'], 
-                                              high=processed['High'], low=processed['Low'], close=processed['Close'])])
+                        st.markdown("---")
+                        
+                        # --- NEW: TIMEFRAME PREDICTION DASHBOARD ---
+                        st.subheader("📅 Multi-Timeframe Forecast")
+                        t1, t2, t3, t4 = st.columns(4)
+                        t1.info(f"**1 Week:** {long_term_preds.get('1 Week', 'N/A')}")
+                        t2.info(f"**1 Month:** {long_term_preds.get('1 Month', 'N/A')}")
+                        t3.info(f"**3 Months:** {long_term_preds.get('3 Months', 'N/A')}")
+                        t4.info(f"**6 Months:** {long_term_preds.get('6 Months', 'N/A')}")
+                        
+                        st.markdown("---")
+
+                        # --- PRO CHARTING ---
+                        st.subheader("📊 Advanced Charting")
+                        c1, c2, c3 = st.columns(3)
+                        show_bb = c1.checkbox("Bollinger Bands", value=True)
+                        show_ma = c2.checkbox("SMA 20/50", value=True)
+                        show_macd = c3.checkbox("Show MACD", value=False)
+                        
+                        fig = go.Figure()
+                        fig.add_trace(go.Candlestick(x=processed.index, open=processed['Open'], high=processed['High'], low=processed['Low'], close=processed['Close'], name="Price"))
+                        
+                        if show_bb:
+                            fig.add_trace(go.Scatter(x=processed.index, y=processed['BB_High'], line=dict(color='rgba(173, 216, 230, 0.5)'), name='BB High'))
+                            fig.add_trace(go.Scatter(x=processed.index, y=processed['BB_Low'], line=dict(color='rgba(173, 216, 230, 0.5)'), fill='tonexty', name='BB Low'))
+                        
+                        if show_ma:
+                            fig.add_trace(go.Scatter(x=processed.index, y=processed['SMA_20'], line=dict(color='orange', width=1), name='SMA 20'))
+                            fig.add_trace(go.Scatter(x=processed.index, y=processed['SMA_50'], line=dict(color='blue', width=1), name='SMA 50'))
+
+                        # Buy Signals
                         buys = processed[processed['Confidence'] > 0.6]
-                        fig.add_trace(go.Scatter(x=buys.index, y=buys['Low']*0.99, mode='markers', 
-                                                 marker=dict(color='#00FF00', size=8, symbol='triangle-up'), name='Buy'))
-                        fig.update_layout(height=500, template="plotly_dark", xaxis_rangeslider_visible=False)
+                        fig.add_trace(go.Scatter(x=buys.index, y=buys['Low']*0.99, mode='markers', marker=dict(color='#00FF00', size=8, symbol='triangle-up'), name='Buy Signal'))
+
+                        fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False)
                         st.plotly_chart(fig, use_container_width=True)
                         
+                        if show_macd:
+                            fig_macd = go.Figure()
+                            fig_macd.add_trace(go.Scatter(x=processed.index, y=processed['MACD'], line=dict(color='cyan'), name='MACD'))
+                            fig_macd.add_trace(go.Scatter(x=processed.index, y=processed['MACD_Signal'], line=dict(color='orange'), name='Signal'))
+                            fig_macd.update_layout(height=200, template="plotly_dark", margin=dict(t=0))
+                            st.plotly_chart(fig_macd, use_container_width=True)
+
+                        # --- ACTIONS ---
                         c1, c2 = st.columns([1, 2])
                         with c1:
-                            st.subheader("🗳️ Model Votes")
+                            st.subheader("🗳️ Consensus Votes")
                             for model, prob in votes.items():
                                 st.progress(prob, text=f"{model}: {prob*100:.0f}% Bullish")
                             
@@ -112,198 +174,130 @@ def main():
                             if st.button(f"🛒 Paper Buy {ticker}"):
                                 rate = logic.get_exchange_rate("GBP") if "GBP" in base_curr else 1.0
                                 usd_cap = capital / rate
-                                shares = int((usd_cap * 0.02) / (1.5 * last['ATR'])) # 2% risk
+                                shares = int((usd_cap * 0.02) / (1.5 * last['ATR'])) # 2% Risk Rule
                                 res = logic.execute_trade(ticker, last['Close'], shares, "BUY", "USD")
                                 st.success(f"Bought {shares} shares! ({res})")
 
                         with c2:
-                            st.subheader("🤖 AI & Alerts")
+                            st.subheader("🤖 GPT Analysis")
                             if st.button("Analyze News"):
                                 report, _ = logic.get_ai_analysis(ticker, st.session_state['openai_key'])
                                 st.info(report)
-                                
                             st.markdown("---")
-                            if st.button("📱 Send Telegram Alert"):
-                                msg = f"🚀 *{ticker} ({interval}) Analysis*\nSignal: {sig}\nPrice: ${last['Close']:.2f}\nConfidence: {conf*100:.0f}%"
+                            if st.button("📱 Telegram Alert"):
+                                msg = f"🚀 *{ticker} ({interval}) Update*\nSig: {sig}\nPrice: ${last['Close']:.2f}\nConf: {conf*100:.0f}%"
                                 res = logic.send_telegram_alert(st.session_state['tele_token'], st.session_state['tele_chat'], msg)
-                                if "✅" in res:
-                                    st.success(res)
-                                else:
-                                    st.error(f"{res} - Check Settings Tab!")
+                                st.success(res) if "✅" in res else st.error(res)
 
-                else:
-                    st.error("Data not available. Try another ticker or a different timeframe.")
+                else: st.error("Data Unavailable.")
 
-    # --- TAB 2: SCANNER & WATCHDOG ---
+    # --- TAB 2: SCANNER ---
     with tabs[1]:
         st.header("🦅 Market Hunter")
-        st.caption("Scan your watchlist for the highest confidence AI setups.")
-        
-        if st.button("🚀 Scan All Watchlist Stocks"):
-            with st.spinner("Scanning markets..."):
-                scan_res = logic.scan_market()
-                if not scan_res.empty:
-                    top = scan_res[scan_res['Signal'].str.contains("BUY")]
+        if st.button("🚀 Scan Watchlist"):
+            with st.spinner("Scanning..."):
+                res = logic.scan_market()
+                if not res.empty:
+                    top = res[res['Signal'].str.contains("BUY")]
                     if not top.empty:
-                        st.success(f"Found {len(top)} Opportunities!")
-                        st.dataframe(top.style.format({"Price": "${:.2f}", "Confidence": "{:.1%}", "RSI": "{:.0f}"}))
-                    else:
-                        st.info("No strong Buy signals found.")
-                    with st.expander("Full Results"):
-                        st.dataframe(scan_res.style.format({"Price": "${:.2f}", "Confidence": "{:.1%}"}))
-                else:
-                    st.warning("Watchlist empty or data error.")
-        
-        st.markdown("---")
+                        st.success(f"Found {len(top)} Buys!")
+                        st.dataframe(top.style.format({"Price": "${:.2f}", "Confidence": "{:.1%}"}))
+                    else: st.info("No strong buys.")
+                    with st.expander("Full Results"): st.dataframe(res)
+                else: st.warning("Watchlist empty.")
         
         st.subheader("🐶 Watchlist Manager")
         c1, c2 = st.columns([3, 1])
-        new_t = c1.text_input("Add Symbol (e.g., TSLA)")
-        if c2.button("Add"):
-            logic.add_to_watchlist(new_t.upper())
-            st.rerun()
-            
-        watchlist = logic.get_watchlist()
-        if watchlist:
+        new_t = c1.text_input("Add Symbol")
+        if c2.button("Add"): logic.add_to_watchlist(new_t.upper()); st.rerun()
+        wl = logic.get_watchlist()
+        if wl:
             cols = st.columns(5)
-            for i, t in enumerate(watchlist):
-                if cols[i%5].button(f"❌ {t}"):
-                    logic.remove_from_watchlist(t)
-                    st.rerun()
+            for i, t in enumerate(wl):
+                if cols[i%5].button(f"❌ {t}"): logic.remove_from_watchlist(t); st.rerun()
 
-    # --- TAB 3: BACKTESTING ---
+    # --- TAB 3: BACKTEST ---
     with tabs[2]:
         st.header(f"🔙 Time Machine: {ticker}")
-        st.caption("Test how the AI would have performed over the last 2 years.")
-        
-        if st.button("Run Backtest Simulation"):
-            with st.spinner("Simulating trades..."):
+        if st.button("Run Simulation"):
+            with st.spinner("Simulating..."):
                 rate = logic.get_exchange_rate("GBP") if "GBP" in base_curr else 1.0
-                usd_cap = capital / rate
-                
-                res, trades, ret = logic.run_backtest(ticker, usd_cap)
-                
+                res, trades, ret = logic.run_backtest(ticker, capital/rate)
                 if res is not None:
                     c1, c2, c3 = st.columns(3)
-                    c1.metric("Total Return", f"{ret:.2f}%")
+                    c1.metric("Return", f"{ret:.2f}%")
                     c2.metric("Final Balance", f"${res['Equity'].iloc[-1]:.2f}")
-                    c3.metric("Total Trades", len(trades) if not trades.empty else 0)
+                    c3.metric("Trades", len(trades))
                     st.line_chart(res['Equity'])
-                    st.subheader("Trade Log")
                     st.dataframe(trades)
-                else:
-                    st.error("Backtest failed due to insufficient data.")
 
-    # --- TAB 4: MACRO & SECTORS ---
+    # --- TAB 4: MACRO ---
     with tabs[3]:
         st.header("🌍 Global Dashboard")
         macro = logic.get_macro_data()
         cols = st.columns(len(macro))
-        for i, (k, v) in enumerate(macro.items()):
-            cols[i].metric(k, f"{v['Price']:.2f}", f"{v['Change']:.2f}%")
-        
+        for i, (k, v) in enumerate(macro.items()): cols[i].metric(k, f"{v['Price']:.2f}", f"{v['Change']:.2f}%")
         st.markdown("---")
-        st.subheader("🔥 US Sector Heatmap")
+        st.subheader("🔥 Sector Heatmap")
         sectors = logic.get_sector_heatmap()
-        s_cols = st.columns(4)
-        for i, (sect, chg) in enumerate(sectors.items()):
-            color = "green" if chg > 0 else "red"
-            s_cols[i % 4].markdown(f"""
-                <div style="background-color: {'#1e3d1e' if chg>0 else '#3d1e1e'}; 
-                            padding: 15px; border-radius: 10px; text-align: center; margin-bottom: 10px;">
-                    <strong>{sect}</strong><br>
-                    <span style="color: {color}; font-size: 1.2em;">{chg:+.2f}%</span>
-                </div>
-            """, unsafe_allow_html=True)
+        cols = st.columns(4)
+        for i, (s, c) in enumerate(sectors.items()):
+            color = "green" if c > 0 else "red"
+            cols[i%4].markdown(f"<div style='background:{'#1e3d1e' if c>0 else '#3d1e1e'};padding:10px;border-radius:5px;text-align:center'><b>{s}</b><br><span style='color:{color}'>{c:+.2f}%</span></div>", unsafe_allow_html=True)
 
-    # --- TAB 5: PORTFOLIO (UPDATED) ---
+    # --- TAB 5: PORTFOLIO ---
     with tabs[4]:
         st.header(f"💼 Paper Portfolio ({base_curr})")
         
-        # 1. NEW: TRADING JOURNAL
-        with st.expander("📓 Trading Journal / Notes"):
-            journal_entry = st.text_area("Why did you take your last trade?", placeholder="e.g., AI Confidence was 85% and Sector Heatmap was Green.")
-            if st.button("Save Note"):
-                st.success("Note saved to Trade Log! (Simulation)")
-
-        st.markdown("---")
-
+        with st.expander("📓 Trading Journal"):
+            note = st.text_area("Why did you trade?", placeholder="e.g. AI Conf 80%...")
+            if st.button("Save Note"): st.success("Saved!")
+        
         df = logic.get_portfolio()
         if not df.empty and not df[df['Status']=='OPEN'].empty:
-            rate_usd_to_base = logic.get_exchange_rate("GBP") if "GBP" in base_curr else 1.0
-            
+            rate = logic.get_exchange_rate("GBP") if "GBP" in base_curr else 1.0
             open_pos = df[df['Status']=='OPEN'].copy()
             total_val = 0
             
-            st.subheader("Open Positions")
-            header = st.columns([2, 1, 1, 1, 1])
-            header[0].write("**Ticker**")
-            header[1].write("**Shares**")
-            header[2].write("**Avg Cost**")
-            header[3].write("**Value**")
-            header[4].write("**Action**")
+            st.subheader("Positions")
+            hdr = st.columns([2,1,1,1,1])
+            hdr[0].write("**Ticker**"); hdr[1].write("**Shares**"); hdr[2].write("**Cost**"); hdr[3].write("**Value**"); hdr[4].write("**Action**")
             
             for i, row in open_pos.iterrows():
-                live_data = logic.get_data(row['Ticker'], period="1d", interval="1m")
-                curr_price = live_data['Close'].iloc[-1] if live_data is not None else row['Buy_Price_USD']
-                
-                val_usd = curr_price * row['Shares']
-                val_base = val_usd * rate_usd_to_base
-                cost_base = (row['Buy_Price_USD'] * row['Shares']) * rate_usd_to_base
+                live = logic.get_data(row['Ticker'], period="1d", interval="1m")
+                price = live['Close'].iloc[-1] if live is not None else row['Buy_Price_USD']
+                val_base = (price * row['Shares']) * rate
+                cost_base = (row['Buy_Price_USD'] * row['Shares']) * rate
                 pnl = val_base - cost_base
                 total_val += val_base
                 
-                c = st.columns([2, 1, 1, 1, 1])
+                c = st.columns([2,1,1,1,1])
                 c[0].write(f"**{row['Ticker']}**")
                 c[1].write(f"{row['Shares']}")
                 c[2].write(f"{base_curr[0]}{cost_base/row['Shares']:.2f}")
                 c[3].write(f"{base_curr[0]}{val_base:.2f} (: {'green' if pnl>0 else 'red'}[{pnl:+.2f}])")
                 if c[4].button("Sell", key=f"s_{i}"):
-                    logic.execute_trade(row['Ticker'], curr_price, 0, "SELL")
+                    logic.execute_trade(row['Ticker'], price, 0, "SELL")
                     st.rerun()
-            st.metric("Total Portfolio Value", f"{base_curr[0]}{total_val:.2f}")
-
-            # 2. NEW: CORRELATION HEATMAP
+            
+            st.metric("Total Value", f"{base_curr[0]}{total_val:.2f}")
+            
             st.markdown("---")
-            st.subheader("⚠️ Risk Analysis: Correlation Matrix")
-            st.caption("Dark Red = Stocks move together (High Risk). Blue = Stocks move opposite (Hedge).")
-            
-            # Get open tickers
-            open_tickers = df[df['Status']=='OPEN']
-            corr_matrix = logic.get_correlation_matrix(open_tickers)
-            
-            if corr_matrix is not None:
-                fig_corr = go.Figure(data=go.Heatmap(
-                    z=corr_matrix.values,
-                    x=corr_matrix.columns,
-                    y=corr_matrix.columns,
-                    colorscale='RdBu_r', 
-                    zmin=-1, zmax=1
-                ))
-                fig_corr.update_layout(height=400, title="Portfolio Diversification Check")
-                st.plotly_chart(fig_corr, use_container_width=True)
-            else:
-                st.info("Add at least 2 different stocks to see correlation risk.")
-        else:
-            st.info("No open trades.")
+            st.subheader("⚠️ Correlation Risk Matrix")
+            corr = logic.get_correlation_matrix(open_pos)
+            if corr is not None:
+                fig = go.Figure(data=go.Heatmap(z=corr.values, x=corr.columns, y=corr.columns, colorscale='RdBu_r', zmin=-1, zmax=1))
+                fig.update_layout(height=400)
+                st.plotly_chart(fig, use_container_width=True)
+            else: st.info("Add 2+ stocks to see correlation.")
+        else: st.info("No active trades.")
 
     # --- TAB 6: SETTINGS ---
     with tabs[5]:
         st.header("⚙️ Settings")
-        st.info("Keys are loaded from secrets.toml if available. Otherwise, enter them here.")
-        
-        st.session_state['openai_key'] = st.text_input("OpenAI Key", 
-            value=st.session_state['openai_key'], type="password")
-            
-        st.session_state['tele_token'] = st.text_input("Telegram Token", 
-            value=st.session_state['tele_token'], type="password")
-            
-        st.session_state['tele_chat'] = st.text_input("Telegram Chat ID", 
-            value=st.session_state['tele_chat'], type="password")
-        
-        st.markdown("---")
-        if st.button("Logout"):
-            st.session_state['auth'] = False
-            st.rerun()
+        st.session_state['openai_key'] = st.text_input("OpenAI Key", st.session_state['openai_key'], type="password")
+        st.session_state['tele_token'] = st.text_input("Tele Token", st.session_state['tele_token'], type="password")
+        st.session_state['tele_chat'] = st.text_input("Tele Chat ID", st.session_state['tele_chat'], type="password")
+        if st.button("Logout"): st.session_state['auth'] = False; st.rerun()
 
 main()
