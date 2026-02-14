@@ -30,6 +30,9 @@ def main():
     if query:
         res = logic.search_ticker(query)
         if res: ticker = res[st.sidebar.selectbox("Results", list(res.keys()))]
+    else:
+        manual = st.sidebar.text_input("Or Symbol", "AAPL").upper()
+        if manual: ticker = manual
     
     st.sidebar.markdown("---")
     st.sidebar.header("💷 Portfolio Settings")
@@ -40,7 +43,14 @@ def main():
     openai_key = st.secrets.get("api", {}).get("openai_key", "")
     
     # TABS
-    tabs = st.tabs(["📈 Terminal", "🌍 Macro & Sectors", "💼 Multi-Currency Portfolio", "⚙️ Settings"])
+    tabs = st.tabs([
+        "📈 Terminal", 
+        "🦅 Scanner & Watchdog", 
+        "🔙 Backtest", 
+        "🌍 Macro & Sectors", 
+        "💼 Multi-Currency Portfolio", 
+        "⚙️ Settings"
+    ])
 
     # --- TAB 1: TERMINAL ---
     with tabs[0]:
@@ -84,7 +94,6 @@ def main():
                             
                             st.markdown("---")
                             if st.button(f"🛒 Paper Buy {ticker}"):
-                                # Convert Capital to USD for calculation (simplified)
                                 rate = logic.get_exchange_rate("GBP") if "GBP" in base_curr else 1.0
                                 usd_cap = capital / rate
                                 shares = int((usd_cap * 0.02) / (1.5 * last['ATR'])) # 2% risk
@@ -96,25 +105,88 @@ def main():
                             if st.button("Analyze News"):
                                 report, _ = logic.get_ai_analysis(ticker, openai_key)
                                 st.info(report)
+                else:
+                    st.error("Data not available. Try another ticker.")
 
-    # --- TAB 2: MACRO & SECTORS ---
+    # --- TAB 2: SCANNER & WATCHDOG ---
     with tabs[1]:
-        st.header("🌍 Global Dashboard")
+        st.header("🦅 Market Hunter")
+        st.caption("Scan your watchlist for the highest confidence AI setups.")
         
-        # MACRO ROW
-        st.subheader("Economic Indicators")
+        # SCANNER
+        if st.button("🚀 Scan All Watchlist Stocks"):
+            with st.spinner("Scanning markets..."):
+                scan_res = logic.scan_market()
+                if not scan_res.empty:
+                    top = scan_res[scan_res['Signal'].str.contains("BUY")]
+                    if not top.empty:
+                        st.success(f"Found {len(top)} Opportunities!")
+                        st.dataframe(top.style.format({"Price": "${:.2f}", "Confidence": "{:.1%}", "RSI": "{:.0f}"}))
+                    else:
+                        st.info("No strong Buy signals found.")
+                    with st.expander("Full Results"):
+                        st.dataframe(scan_res.style.format({"Price": "${:.2f}", "Confidence": "{:.1%}"}))
+                else:
+                    st.warning("Watchlist empty or data error.")
+        
+        st.markdown("---")
+        
+        # WATCHDOG MANAGER
+        st.subheader("🐶 Watchlist Manager")
+        c1, c2 = st.columns([3, 1])
+        new_t = c1.text_input("Add Symbol (e.g., TSLA)")
+        if c2.button("Add"):
+            logic.add_to_watchlist(new_t.upper())
+            st.rerun()
+            
+        watchlist = logic.get_watchlist()
+        if watchlist:
+            cols = st.columns(5)
+            for i, t in enumerate(watchlist):
+                if cols[i%5].button(f"❌ {t}"):
+                    logic.remove_from_watchlist(t)
+                    st.rerun()
+
+    # --- TAB 3: BACKTESTING ---
+    with tabs[2]:
+        st.header(f"🔙 Time Machine: {ticker}")
+        st.caption("Test how the AI would have performed over the last 2 years.")
+        
+        if st.button("Run Backtest Simulation"):
+            with st.spinner("Simulating trades..."):
+                # Convert user capital to USD for the test logic
+                rate = logic.get_exchange_rate("GBP") if "GBP" in base_curr else 1.0
+                usd_cap = capital / rate
+                
+                res, trades, ret = logic.run_backtest(ticker, usd_cap)
+                
+                if res is not None:
+                    # Metrics
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Total Return", f"{ret:.2f}%")
+                    c2.metric("Final Balance", f"${res['Equity'].iloc[-1]:.2f}")
+                    c3.metric("Total Trades", len(trades) if not trades.empty else 0)
+                    
+                    # Equity Curve
+                    st.line_chart(res['Equity'])
+                    
+                    # Trade Log
+                    st.subheader("Trade Log")
+                    st.dataframe(trades)
+                else:
+                    st.error("Backtest failed due to insufficient data.")
+
+    # --- TAB 4: MACRO & SECTORS ---
+    with tabs[3]:
+        st.header("🌍 Global Dashboard")
         macro = logic.get_macro_data()
         cols = st.columns(len(macro))
         for i, (k, v) in enumerate(macro.items()):
             cols[i].metric(k, f"{v['Price']:.2f}", f"{v['Change']:.2f}%")
         
         st.markdown("---")
-        
-        # SECTOR HEATMAP
-        st.subheader("🔥 US Sector Heatmap (Money Flow)")
+        st.subheader("🔥 US Sector Heatmap")
         sectors = logic.get_sector_heatmap()
-        
-        # Create a grid
         s_cols = st.columns(4)
         for i, (sect, chg) in enumerate(sectors.items()):
             color = "green" if chg > 0 else "red"
@@ -126,16 +198,13 @@ def main():
                 </div>
             """, unsafe_allow_html=True)
 
-    # --- TAB 3: PORTFOLIO (GBP/USD) ---
-    with tabs[2]:
+    # --- TAB 5: PORTFOLIO ---
+    with tabs[4]:
         st.header(f"💼 Paper Portfolio ({base_curr})")
-        
         df = logic.get_portfolio()
         if not df.empty and not df[df['Status']=='OPEN'].empty:
-            # Conversion Rate
             rate_usd_to_base = logic.get_exchange_rate("GBP") if "GBP" in base_curr else 1.0
             
-            # Update Live Prices
             open_pos = df[df['Status']=='OPEN'].copy()
             total_val = 0
             
@@ -148,35 +217,31 @@ def main():
             header[4].write("**Action**")
             
             for i, row in open_pos.iterrows():
-                # Get live price
                 live_data = logic.get_data(row['Ticker'], period="1d", interval="1m")
                 curr_price = live_data['Close'].iloc[-1] if live_data is not None else row['Buy_Price_USD']
                 
-                # Values in Base Currency
                 val_usd = curr_price * row['Shares']
                 val_base = val_usd * rate_usd_to_base
                 cost_base = (row['Buy_Price_USD'] * row['Shares']) * rate_usd_to_base
                 pnl = val_base - cost_base
                 total_val += val_base
                 
-                # Render Row
                 c = st.columns([2, 1, 1, 1, 1])
                 c[0].write(f"**{row['Ticker']}**")
                 c[1].write(f"{row['Shares']}")
-                c[2].write(f"{base_curr[0]}{cost_base/row['Shares']:.2f}") # Avg Cost in £
+                c[2].write(f"{base_curr[0]}{cost_base/row['Shares']:.2f}")
                 c[3].write(f"{base_curr[0]}{val_base:.2f} (: {'green' if pnl>0 else 'red'}[{pnl:+.2f}])")
                 if c[4].button("Sell", key=f"s_{i}"):
                     logic.execute_trade(row['Ticker'], curr_price, 0, "SELL")
                     st.rerun()
-            
             st.metric("Total Portfolio Value", f"{base_curr[0]}{total_val:.2f}")
         else:
             st.info("No open trades.")
 
-    # --- TAB 4: SETTINGS ---
-    with tabs[3]:
+    # --- TAB 6: SETTINGS ---
+    with tabs[5]:
         st.header("⚙️ Settings")
-        st.info("API Keys are loaded from secrets.toml (Secure)")
+        st.info("API Keys loaded from secrets.toml")
         if st.button("Logout"):
             st.session_state['auth'] = False
             st.rerun()
