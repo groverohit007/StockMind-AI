@@ -44,11 +44,10 @@ def main():
     
     st.sidebar.markdown("---")
     
-    # RESTORED: TRADING MODE & INTERVAL
+    # TIMEFRAME & MODE
     st.sidebar.header("⏱️ Timeframe")
     mode = st.sidebar.radio("Strategy Mode", ["Swing (Daily)", "Day Trading (Intraday)"])
     
-    # Default interval
     interval = "1d"
     if "Day Trading" in mode:
         interval = st.sidebar.selectbox("Select Interval", ["15m", "30m", "1h"])
@@ -77,7 +76,6 @@ def main():
             st.title(f"{ticker} Analysis ({interval})")
             
             with st.spinner(f"Running Consensus AI on {interval} data..."):
-                # PASS THE SELECTED INTERVAL TO LOGIC
                 data = logic.get_data(ticker, interval=interval)
                 
                 if data is not None and not data.empty:
@@ -87,10 +85,8 @@ def main():
                         last = processed.iloc[-1]
                         conf = last['Confidence']
                         
-                        # SIGNAL LOGIC
                         sig = "BUY 🟢" if conf > 0.6 else "SELL 🔴" if conf < 0.4 else "HOLD ⚪"
                         
-                        # TOP METRICS
                         m1, m2, m3, m4 = st.columns(4)
                         m1.metric("Price", f"${last['Close']:.2f}")
                         m2.metric("Consensus Signal", sig)
@@ -106,7 +102,6 @@ def main():
                         fig.update_layout(height=500, template="plotly_dark", xaxis_rangeslider_visible=False)
                         st.plotly_chart(fig, use_container_width=True)
                         
-                        # CONSENSUS DETAILS & ACTION
                         c1, c2 = st.columns([1, 2])
                         with c1:
                             st.subheader("🗳️ Model Votes")
@@ -114,7 +109,6 @@ def main():
                                 st.progress(prob, text=f"{model}: {prob*100:.0f}% Bullish")
                             
                             st.markdown("---")
-                            # Paper Trading Button
                             if st.button(f"🛒 Paper Buy {ticker}"):
                                 rate = logic.get_exchange_rate("GBP") if "GBP" in base_curr else 1.0
                                 usd_cap = capital / rate
@@ -124,15 +118,11 @@ def main():
 
                         with c2:
                             st.subheader("🤖 AI & Alerts")
-                            
-                            # OpenAI Analysis
                             if st.button("Analyze News"):
                                 report, _ = logic.get_ai_analysis(ticker, st.session_state['openai_key'])
                                 st.info(report)
                                 
                             st.markdown("---")
-                            
-                            # Telegram Alert Button
                             if st.button("📱 Send Telegram Alert"):
                                 msg = f"🚀 *{ticker} ({interval}) Analysis*\nSignal: {sig}\nPrice: ${last['Close']:.2f}\nConfidence: {conf*100:.0f}%"
                                 res = logic.send_telegram_alert(st.session_state['tele_token'], st.session_state['tele_chat'], msg)
@@ -149,7 +139,6 @@ def main():
         st.header("🦅 Market Hunter")
         st.caption("Scan your watchlist for the highest confidence AI setups.")
         
-        # SCANNER
         if st.button("🚀 Scan All Watchlist Stocks"):
             with st.spinner("Scanning markets..."):
                 scan_res = logic.scan_market()
@@ -167,7 +156,6 @@ def main():
         
         st.markdown("---")
         
-        # WATCHDOG MANAGER
         st.subheader("🐶 Watchlist Manager")
         c1, c2 = st.columns([3, 1])
         new_t = c1.text_input("Add Symbol (e.g., TSLA)")
@@ -228,9 +216,18 @@ def main():
                 </div>
             """, unsafe_allow_html=True)
 
-    # --- TAB 5: PORTFOLIO ---
+    # --- TAB 5: PORTFOLIO (UPDATED) ---
     with tabs[4]:
         st.header(f"💼 Paper Portfolio ({base_curr})")
+        
+        # 1. NEW: TRADING JOURNAL
+        with st.expander("📓 Trading Journal / Notes"):
+            journal_entry = st.text_area("Why did you take your last trade?", placeholder="e.g., AI Confidence was 85% and Sector Heatmap was Green.")
+            if st.button("Save Note"):
+                st.success("Note saved to Trade Log! (Simulation)")
+
+        st.markdown("---")
+
         df = logic.get_portfolio()
         if not df.empty and not df[df['Status']=='OPEN'].empty:
             rate_usd_to_base = logic.get_exchange_rate("GBP") if "GBP" in base_curr else 1.0
@@ -265,6 +262,28 @@ def main():
                     logic.execute_trade(row['Ticker'], curr_price, 0, "SELL")
                     st.rerun()
             st.metric("Total Portfolio Value", f"{base_curr[0]}{total_val:.2f}")
+
+            # 2. NEW: CORRELATION HEATMAP
+            st.markdown("---")
+            st.subheader("⚠️ Risk Analysis: Correlation Matrix")
+            st.caption("Dark Red = Stocks move together (High Risk). Blue = Stocks move opposite (Hedge).")
+            
+            # Get open tickers
+            open_tickers = df[df['Status']=='OPEN']
+            corr_matrix = logic.get_correlation_matrix(open_tickers)
+            
+            if corr_matrix is not None:
+                fig_corr = go.Figure(data=go.Heatmap(
+                    z=corr_matrix.values,
+                    x=corr_matrix.columns,
+                    y=corr_matrix.columns,
+                    colorscale='RdBu_r', 
+                    zmin=-1, zmax=1
+                ))
+                fig_corr.update_layout(height=400, title="Portfolio Diversification Check")
+                st.plotly_chart(fig_corr, use_container_width=True)
+            else:
+                st.info("Add at least 2 different stocks to see correlation risk.")
         else:
             st.info("No open trades.")
 
