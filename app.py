@@ -30,18 +30,25 @@ if not st.session_state['auth']:
     st.stop()
 
 def main():
-    # --- SIDEBAR: SEARCH & FUNDAMENTALS ---
+    # --- SIDEBAR: SEARCH & MARKETS ---
     st.sidebar.header("🔍 Market Search")
+    
+    # NEW: MARKET REGION SELECTOR
+    market_region = st.sidebar.selectbox("Select Market", 
+        ["All", "USA (NASDAQ/NYSE)", "UK (LSE)", "India (NSE/BSE)"])
+    
     ticker = "AAPL"
     query = st.sidebar.text_input("Ticker / Company")
+    
     if query:
-        res = logic.search_ticker(query)
+        # Pass the region to search_ticker logic
+        res = logic.search_ticker(query, region=market_region)
         if res: ticker = res[st.sidebar.selectbox("Results", list(res.keys()))]
     else:
         manual = st.sidebar.text_input("Or Symbol", "AAPL").upper()
         if manual: ticker = manual
 
-    # NEW: FUNDAMENTAL HEALTH CHECK WIDGET
+    # --- SIDEBAR: FUNDAMENTAL HEALTH ---
     if ticker:
         st.sidebar.markdown("---")
         st.sidebar.header("🏢 Health Check")
@@ -49,7 +56,6 @@ def main():
         if fund:
             st.sidebar.caption(f"{fund['Industry']} | {fund['Sector']}")
             
-            # Formatting Market Cap
             mc = fund['Market Cap']
             if isinstance(mc, (int, float)):
                 if mc > 1e12: mc_str = f"${mc/1e12:.2f}T"
@@ -68,7 +74,6 @@ def main():
             div_fmt = f"{div*100:.2f}%" if isinstance(div, (int, float)) else "0%"
             c4.metric("Div Yield", div_fmt)
             
-            # Health Warning
             pe = fund['P/E Ratio']
             if isinstance(pe, (int, float)) and pe > 100:
                 st.sidebar.warning("⚠️ Overvalued? (High P/E)")
@@ -94,17 +99,23 @@ def main():
         if ticker:
             st.title(f"{ticker} Pro Analysis ({interval})")
             
+            # TOP ACTION BAR
+            c_top1, c_top2 = st.columns([3, 1])
+            with c_top2:
+                # NEW: ADD TO WATCHLIST BUTTON
+                if st.button(f"➕ Add {ticker} to Watchlist"):
+                    logic.add_to_watchlist(ticker)
+                    st.success(f"Added {ticker} to Watchdog!")
+
             with st.spinner("Analyzing Market Data & Training Models..."):
                 data = logic.get_data(ticker, interval=interval)
                 
                 if data is not None and not data.empty:
-                    # 1. Add Technicals for Charting
+                    # 1. Technicals
                     data = logic.add_technical_overlays(data)
-                    
-                    # 2. Run Main AI (Short Term)
+                    # 2. AI Short Term
                     processed, _, votes = logic.train_consensus_model(data)
-                    
-                    # 3. Run Multi-Timeframe AI (Long Term) - NEW
+                    # 3. AI Long Term
                     long_term_preds = logic.predict_long_term_trends(data)
                     
                     if processed is not None:
@@ -112,7 +123,6 @@ def main():
                         conf = last['Confidence']
                         sig = "BUY 🟢" if conf > 0.6 else "SELL 🔴" if conf < 0.4 else "HOLD ⚪"
                         
-                        # --- TOP METRICS ---
                         m1, m2, m3, m4 = st.columns(4)
                         m1.metric("Current Price", f"${last['Close']:.2f}")
                         m2.metric("Short-Term Signal", sig)
@@ -121,7 +131,6 @@ def main():
                         
                         st.markdown("---")
                         
-                        # --- NEW: TIMEFRAME PREDICTION DASHBOARD ---
                         st.subheader("📅 Multi-Timeframe Forecast")
                         t1, t2, t3, t4 = st.columns(4)
                         t1.info(f"**1 Week:** {long_term_preds.get('1 Week', 'N/A')}")
@@ -131,7 +140,6 @@ def main():
                         
                         st.markdown("---")
 
-                        # --- PRO CHARTING ---
                         st.subheader("📊 Advanced Charting")
                         c1, c2, c3 = st.columns(3)
                         show_bb = c1.checkbox("Bollinger Bands", value=True)
@@ -149,7 +157,6 @@ def main():
                             fig.add_trace(go.Scatter(x=processed.index, y=processed['SMA_20'], line=dict(color='orange', width=1), name='SMA 20'))
                             fig.add_trace(go.Scatter(x=processed.index, y=processed['SMA_50'], line=dict(color='blue', width=1), name='SMA 50'))
 
-                        # Buy Signals
                         buys = processed[processed['Confidence'] > 0.6]
                         fig.add_trace(go.Scatter(x=buys.index, y=buys['Low']*0.99, mode='markers', marker=dict(color='#00FF00', size=8, symbol='triangle-up'), name='Buy Signal'))
 
@@ -163,7 +170,6 @@ def main():
                             fig_macd.update_layout(height=200, template="plotly_dark", margin=dict(t=0))
                             st.plotly_chart(fig_macd, use_container_width=True)
 
-                        # --- ACTIONS ---
                         c1, c2 = st.columns([1, 2])
                         with c1:
                             st.subheader("🗳️ Consensus Votes")
@@ -174,7 +180,7 @@ def main():
                             if st.button(f"🛒 Paper Buy {ticker}"):
                                 rate = logic.get_exchange_rate("GBP") if "GBP" in base_curr else 1.0
                                 usd_cap = capital / rate
-                                shares = int((usd_cap * 0.02) / (1.5 * last['ATR'])) # 2% Risk Rule
+                                shares = int((usd_cap * 0.02) / (1.5 * last['ATR'])) 
                                 res = logic.execute_trade(ticker, last['Close'], shares, "BUY", "USD")
                                 st.success(f"Bought {shares} shares! ({res})")
 
