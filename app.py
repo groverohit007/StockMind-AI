@@ -43,7 +43,43 @@ def main_app():
     else:
         interval = "1d"
         st.sidebar.info("🐢 Slow-paced mode: Daily candles")
+        
+# --- NEW TAB: WATCHDOG ---
+    with tabs[1]:
+        st.header("🐶 Watchdog Manager")
+        st.caption("The 24/7 Bot will only scan stocks listed here.")
+        
+        # 1. View Current List
+        watchlist = logic.get_watchlist()
+        if watchlist:
+            st.write("### Currently Watching:")
+            
+            # Create a nice grid display
+            cols = st.columns(4)
+            for i, stock in enumerate(watchlist):
+                col = cols[i % 4]
+                # Card-like display
+                col.info(f"**{stock}**")
+                if col.button(f"Remove {stock}", key=f"rem_{stock}"):
+                    res = logic.remove_from_watchlist(stock)
+                    st.success(res)
+                    time.sleep(1)
+                    st.rerun()
+        else:
+            st.warning("Your watchlist is empty. The Bot has nothing to scan!")
 
+        st.markdown("---")
+        
+        # 2. Add New Stock
+        c1, c2 = st.columns([3, 1])
+        new_ticker = c1.text_input("Add Ticker (e.g., NVDA)", placeholder="NVDA").upper()
+        if c2.button("Add to Watchdog"):
+            if new_ticker:
+                res = logic.add_to_watchlist(new_ticker)
+                st.success(res)
+                time.sleep(1)
+                st.rerun()
+                
     # 3. Risk Settings
     st.sidebar.markdown("---")
     st.sidebar.header("⚖️ Risk Management")
@@ -133,3 +169,4 @@ if not st.session_state['authenticated']:
     login_screen()
 else:
     main_app()
+
