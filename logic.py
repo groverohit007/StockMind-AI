@@ -4,6 +4,7 @@ import numpy as np
 import streamlit as st
 import requests
 import os
+from scipy.optimize import minimize # NEW IMPORT FOR OPTIMIZER
 from ta.momentum import RSIIndicator
 from ta.trend import SMAIndicator, MACD
 from ta.volatility import AverageTrueRange, BollingerBands
@@ -11,7 +12,7 @@ from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier,
 from sklearn.linear_model import LogisticRegression
 from openai import OpenAI
 
-# --- 1. DATA & CACHING (UPDATED SEARCH) ---
+# --- 1. DATA & CACHING ---
 def search_ticker(query, region="All"):
     """
     Searches Yahoo Finance for tickers, filtered by region/market.
@@ -23,9 +24,6 @@ def search_ticker(query, region="All"):
         data = response.json()
         results = {}
         
-        # Define Exchange Codes for Filters
-        # Yahoo Finance Exchange Codes: 
-        # NMS/NGM=NASDAQ, NYQ=NYSE, LSE=London, NSI=NSE(India), BSE=Bombay
         filters = {
             "USA (NASDAQ/NYSE)": ["NMS", "NYQ", "NGM", "ASE", "NCM", "PNK"],
             "UK (LSE)": ["LSE"],
@@ -41,7 +39,6 @@ def search_ticker(query, region="All"):
                 name = quote.get('shortname') or quote.get('longname')
                 exch = quote.get('exchange')
                 
-                # Filter Logic
                 if symbol and name and exch:
                     if region == "All" or exch in allowed_exchanges:
                         results[f"{name} ({symbol}) - {exch}"] = symbol
@@ -96,25 +93,35 @@ def get_fundamentals(ticker):
     except:
         return None
 
-# --- 3. CONSENSUS AI (SHORT TERM) ---
+# --- 3. CONSENSUS AI (ROBUST VERSION) ---
 def train_consensus_model(data):
     df = data.copy()
     if 'Volume' in df.columns: df['Volume'] = df['Volume'].fillna(0)
     
-    # Indicators
+    # 1. Standard Indicators
     df['RSI'] = RSIIndicator(close=df["Close"], window=14).rsi()
     df['SMA_20'] = SMAIndicator(close=df["Close"], window=20).sma_indicator()
     df['SMA_50'] = SMAIndicator(close=df["Close"], window=50).sma_indicator()
     df['ATR'] = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=14).average_true_range()
     
-    # Target: Next Candle Direction
-    df['Target'] = (df['Close'].shift(-1) > df['Close']).astype(int)
+    # 2. NEW: Lagged Features (Memory)
+    df['Return'] = df['Close'].pct_change()
+    df['Lag_1'] = df['Return'].shift(1) # Yesterday
+    df['Lag_2'] = df['Return'].shift(2) # 2 Days ago
+    df['Lag_5'] = df['Return'].shift(5) # Weekly trend
+
+    # 3. NEW: Robust Target (Noise Filter)
+    # Only Buy if price rises > 0.2% (covers fees/spread)
+    threshold = 0.002 
+    df['Future_Return'] = df['Close'].shift(-1) / df['Close'] - 1
+    df['Target'] = (df['Future_Return'] > threshold).astype(int)
     
     if len(df) < 50: return None, [], {}
     df.dropna(inplace=True)
     if df.empty: return None, [], {}
     
-    features = ['RSI', 'SMA_20', 'SMA_50', 'ATR', 'Volume']
+    # Updated Features List
+    features = ['RSI', 'SMA_20', 'SMA_50', 'ATR', 'Volume', 'Lag_1', 'Lag_2', 'Lag_5']
     features = [f for f in features if f in df.columns]
     
     train_size = int(len(df) * 0.90)
@@ -240,6 +247,75 @@ def get_correlation_matrix(portfolio_df):
         d = get_data(t, period="6mo")
         if d is not None: closes[t] = d['Close']
     return pd.DataFrame(closes).corr()
+
+# NEW: VALUE AT RISK (VaR)
+def calculate_portfolio_var(portfolio_df, confidence_level=0.95):
+    """Calculates historical Value at Risk (95% confidence)."""
+    try:
+        tickers = portfolio_df['Ticker'].unique().tolist()
+        weights = portfolio_df['Shares'] * portfolio_df['Buy_Price_USD'] # Approx weights
+        total_value = weights.sum()
+        if total_value == 0: return 0.0
+        weights = weights / total_value
+        
+        # Get historical returns
+        data = pd.DataFrame()
+        for t in tickers:
+            df = get_data(t, period="1y")
+            if df is not None:
+                data[t] = df['Close'].pct_change()
+        
+        data.dropna(inplace=True)
+        if data.empty: return 0.0
+        
+        # Portfolio historical returns
+        data['Portfolio'] = data.dot(weights.values)
+        
+        # Calculate VaR (5th percentile of returns)
+        var_percent = np.percentile(data['Portfolio'], (1 - confidence_level) * 100)
+        var_value = abs(var_percent * total_value)
+        
+        return var_value
+    except:
+        return 0.0
+
+# NEW: PORTFOLIO OPTIMIZER (MARKOWITZ)
+def optimize_portfolio(tickers):
+    """
+    Calculates the best allocation weights (Sharpe Ratio) for a list of tickers.
+    """
+    if len(tickers) < 2: return None
+    
+    # 1. Get Data
+    data = pd.DataFrame()
+    for t in tickers:
+        df = get_data(t, period="1y")
+        if df is not None:
+            data[t] = df['Close']
+            
+    if data.empty: return None
+    
+    # 2. Calculate Returns & Covariance
+    returns = data.pct_change().dropna()
+    mean_returns = returns.mean() * 252 # Annualized
+    cov_matrix = returns.cov() * 252
+    
+    # 3. Define Optimization Function (Negative Sharpe Ratio)
+    def negative_sharpe(weights):
+        p_ret = np.sum(weights * mean_returns)
+        p_vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+        # Assuming risk-free rate ~0 for simplicity
+        return -p_ret / p_vol
+    
+    # 4. Constraints (Weights sum to 1)
+    constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
+    bounds = tuple((0, 1) for _ in range(len(tickers)))
+    init_guess = [1/len(tickers)] * len(tickers)
+    
+    # 5. Run Optimization
+    result = minimize(negative_sharpe, init_guess, method='SLSQP', bounds=bounds, constraints=constraints)
+    
+    return dict(zip(tickers, result.x))
 
 # --- 6. PORTFOLIO & ALERTS ---
 PORTFOLIO_FILE = "portfolio.csv"
