@@ -1,18 +1,17 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import streamlit as st # Needed for caching
+import streamlit as st
+import requests
+import os
 from ta.momentum import RSIIndicator
-from ta.trend import SMAIndicator
-from ta.volatility import AverageTrueRange
+from ta.trend import SMAIndicator, MACD
+from ta.volatility import AverageTrueRange, BollingerBands
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
 from sklearn.linear_model import LogisticRegression
 from openai import OpenAI
-import requests
-import os
-import plotly.graph_objects as go # Needed for Correlation Heatmap logic
 
-# --- 1. DATA & SEARCH (WITH CACHING) ---
+# --- 1. DATA & CACHING ---
 def search_ticker(query):
     try:
         url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=10&newsCount=0"
@@ -31,7 +30,6 @@ def search_ticker(query):
     except:
         return {}
 
-# NEW: Caching added (ttl=300 means data stays saved for 5 minutes)
 @st.cache_data(ttl=300)
 def get_data(ticker, period="2y", interval="1d"):
     try:
@@ -44,23 +42,52 @@ def get_data(ticker, period="2y", interval="1d"):
     except:
         return None
 
-# --- 2. MULTI-MODEL CONSENSUS AI ---
+def add_technical_overlays(df):
+    """Adds Bollinger Bands and MACD for plotting."""
+    df = df.copy()
+    
+    # Bollinger Bands
+    indicator_bb = BollingerBands(close=df["Close"], window=20, window_dev=2)
+    df['BB_High'] = indicator_bb.bollinger_hband()
+    df['BB_Low'] = indicator_bb.bollinger_lband()
+    
+    # MACD
+    indicator_macd = MACD(close=df["Close"], window_slow=26, window_fast=12, window_sign=9)
+    df['MACD'] = indicator_macd.macd()
+    df['MACD_Signal'] = indicator_macd.macd_signal()
+    
+    return df
+
+# --- 2. FUNDAMENTAL HEALTH CHECK ---
+def get_fundamentals(ticker):
+    """Fetches key financial ratios."""
+    try:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        return {
+            "Market Cap": info.get("marketCap", "N/A"),
+            "P/E Ratio": info.get("trailingPE", "N/A"),
+            "Forward P/E": info.get("forwardPE", "N/A"),
+            "Dividend Yield": info.get("dividendYield", "N/A"),
+            "Sector": info.get("sector", "Unknown"),
+            "Industry": info.get("industry", "Unknown"),
+            "Beta": info.get("beta", "N/A")
+        }
+    except:
+        return None
+
+# --- 3. CONSENSUS AI (SHORT TERM) ---
 def train_consensus_model(data):
     df = data.copy()
     if 'Volume' in df.columns: df['Volume'] = df['Volume'].fillna(0)
     
-    rsi_indicator = RSIIndicator(close=df["Close"], window=14)
-    df["RSI"] = rsi_indicator.rsi()
+    # Indicators
+    df['RSI'] = RSIIndicator(close=df["Close"], window=14).rsi()
+    df['SMA_20'] = SMAIndicator(close=df["Close"], window=20).sma_indicator()
+    df['SMA_50'] = SMAIndicator(close=df["Close"], window=50).sma_indicator()
+    df['ATR'] = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=14).average_true_range()
     
-    sma_20 = SMAIndicator(close=df["Close"], window=20)
-    df["SMA_20"] = sma_20.sma_indicator()
-    
-    sma_50 = SMAIndicator(close=df["Close"], window=50)
-    df["SMA_50"] = sma_50.sma_indicator()
-    
-    atr_indicator = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=14)
-    df["ATR"] = atr_indicator.average_true_range()
-    
+    # Target: Next Candle Direction
     df['Target'] = (df['Close'].shift(-1) > df['Close']).astype(int)
     
     if len(df) < 50: return None, [], {}
@@ -85,6 +112,7 @@ def train_consensus_model(data):
     test = test.copy()
     test['Confidence'] = probs
     
+    # Votes for display
     rf.fit(train[features], train['Target'])
     gb.fit(train[features], train['Target'])
     lr.fit(train[features], train['Target'])
@@ -98,15 +126,66 @@ def train_consensus_model(data):
     
     return test, features, votes
 
-# --- 3. MACRO & SECTORS ---
+# --- 4. MULTI-TIMEFRAME PREDICTIONS (NEW) ---
+def predict_long_term_trends(data):
+    """
+    Trains lightweight models for 1W, 1M, 3M, 6M horizons.
+    """
+    df = data.copy()
+    if 'Volume' in df.columns: df['Volume'] = df['Volume'].fillna(0)
+    
+    # Simple Technicals
+    df['RSI'] = RSIIndicator(close=df["Close"], window=14).rsi()
+    df['SMA_50'] = SMAIndicator(close=df["Close"], window=50).sma_indicator()
+    df['SMA_200'] = SMAIndicator(close=df["Close"], window=200).sma_indicator()
+    
+    features = ['RSI', 'SMA_50', 'SMA_200', 'Volume']
+    features = [f for f in features if f in df.columns]
+    
+    horizons = {
+        "1 Week": 5,
+        "1 Month": 20,
+        "3 Months": 60,
+        "6 Months": 120
+    }
+    
+    predictions = {}
+    
+    for name, shift_val in horizons.items():
+        # Create specific target for this horizon
+        temp_df = df.copy()
+        temp_df['Target'] = (temp_df['Close'].shift(-shift_val) > temp_df['Close']).astype(int)
+        temp_df.dropna(inplace=True)
+        
+        if len(temp_df) > 100:
+            train_size = int(len(temp_df) * 0.9)
+            train = temp_df.iloc[:train_size]
+            test = temp_df.iloc[train_size:]
+            
+            # Fast model
+            model = RandomForestClassifier(n_estimators=50, max_depth=5, random_state=42)
+            model.fit(train[features], train['Target'])
+            
+            # Predict on latest data
+            last_row = temp_df.iloc[[-1]]
+            prob = model.predict_proba(last_row[features])[:, 1][0]
+            
+            if prob > 0.6: predictions[name] = "Bullish 🟢"
+            elif prob < 0.4: predictions[name] = "Bearish 🔴"
+            else: predictions[name] = "Neutral ⚪"
+        else:
+            predictions[name] = "N/A (Not enough data)"
+            
+    return predictions
+
+# --- 5. MACRO, SECTORS & RISK ---
 def get_macro_data():
     tickers = {
         "🇺🇸 10Y Yield": "^TNX",
         "💵 Dollar Index": "DX-Y.NYB",
         "🎢 VIX (Fear)": "^VIX",
         "🛢️ Oil": "CL=F",
-        "🏆 Gold": "GC=F",
-        "🇬🇧 FTSE 100": "^FTSE"
+        "🏆 Gold": "GC=F"
     }
     data = {}
     for name, sym in tickers.items():
@@ -115,15 +194,13 @@ def get_macro_data():
             if not d.empty:
                 change = ((d['Close'].iloc[-1] - d['Close'].iloc[-2]) / d['Close'].iloc[-2]) * 100
                 data[name] = {"Price": d['Close'].iloc[-1], "Change": change}
-        except:
-            pass
+        except: pass
     return data
 
 def get_sector_heatmap():
     sectors = {
         "Tech": "XLK", "Finance": "XLF", "Health": "XLV", "Energy": "XLE",
-        "Consumer": "XLY", "Staples": "XLP", "Industrial": "XLI", "Comms": "XLC",
-        "Materials": "XLB", "Utilities": "XLU", "Real Estate": "XLRE"
+        "Consumer": "XLY", "Staples": "XLP", "Real Estate": "XLRE"
     }
     performance = {}
     for name, tick in sectors.items():
@@ -132,39 +209,40 @@ def get_sector_heatmap():
             if len(d) >= 2:
                 change = ((d['Close'].iloc[-1] - d['Close'].iloc[-2]) / d['Close'].iloc[-2]) * 100
                 performance[name] = change
-            else:
-                performance[name] = 0.0
-        except:
-            performance[name] = 0.0
+            else: performance[name] = 0.0
+        except: performance[name] = 0.0
     return performance
 
-# --- 4. MULTI-CURRENCY PORTFOLIO ---
+def get_correlation_matrix(portfolio_df):
+    tickers = portfolio_df['Ticker'].unique().tolist()
+    if len(tickers) < 2: return None
+    closes = {}
+    for t in tickers:
+        d = get_data(t, period="6mo")
+        if d is not None: closes[t] = d['Close']
+    return pd.DataFrame(closes).corr()
+
+# --- 6. PORTFOLIO & ALERTS ---
 PORTFOLIO_FILE = "portfolio.csv"
+WATCHLIST_FILE = "watchlist.txt"
 
 def get_exchange_rate(base_currency="GBP"):
     if base_currency == "USD": return 1.0
     try:
-        pair = f"{base_currency}USD=X" 
+        pair = f"{base_currency}USD=X"
         d = yf.Ticker(pair).history(period="1d")
-        if not d.empty:
-            rate = d['Close'].iloc[-1] 
-            return 1.0 / rate 
-    except:
-        return 0.78 
+        if not d.empty: return 1.0 / d['Close'].iloc[-1]
+    except: return 0.78
     return 1.0
 
 def get_portfolio():
-    if os.path.exists(PORTFOLIO_FILE):
-        return pd.read_csv(PORTFOLIO_FILE)
+    if os.path.exists(PORTFOLIO_FILE): return pd.read_csv(PORTFOLIO_FILE)
     return pd.DataFrame(columns=["Ticker", "Buy_Price_USD", "Shares", "Date", "Status", "Currency"])
 
 def execute_trade(ticker, price_usd, shares, action, currency="USD"):
     df = get_portfolio()
     if action == "BUY":
-        new = pd.DataFrame([{
-            "Ticker": ticker, "Buy_Price_USD": price_usd, "Shares": shares, 
-            "Date": pd.Timestamp.now(), "Status": "OPEN", "Currency": currency
-        }])
+        new = pd.DataFrame([{"Ticker": ticker, "Buy_Price_USD": price_usd, "Shares": shares, "Date": pd.Timestamp.now(), "Status": "OPEN", "Currency": currency}])
         df = pd.concat([df, new], ignore_index=True)
     elif action == "SELL":
         rows = df[(df['Ticker'] == ticker) & (df['Status'] == 'OPEN')]
@@ -172,81 +250,19 @@ def execute_trade(ticker, price_usd, shares, action, currency="USD"):
             idx = rows.index[0]
             df.at[idx, 'Status'] = 'CLOSED'
             df.at[idx, 'Sell_Price_USD'] = price_usd
-            pnl = (price_usd - df.at[idx, 'Buy_Price_USD']) * df.at[idx, 'Shares']
-            df.at[idx, 'Profit_USD'] = pnl
-            
+            df.at[idx, 'Profit_USD'] = (price_usd - df.at[idx, 'Buy_Price_USD']) * df.at[idx, 'Shares']
     df.to_csv(PORTFOLIO_FILE, index=False)
     return "✅ Executed"
 
-# NEW: Risk Management (Correlation)
-def get_correlation_matrix(portfolio_df):
-    """
-    Checks how all stocks in your portfolio move together.
-    Returns a correlation matrix dataframe.
-    """
-    tickers = portfolio_df['Ticker'].unique().tolist()
-    # Need at least 2 stocks to compare
-    if len(tickers) < 2: return None
-    
-    # Download close prices for all tickers
-    closes = {}
-    for t in tickers:
-        d = get_data(t, period="6mo")
-        if d is not None:
-            closes[t] = d['Close']
-            
-    df_closes = pd.DataFrame(closes)
-    # Return Correlation Matrix (Values between -1 and 1)
-    return df_closes.corr()
-
-# --- 5. ALERTS & AI ---
-def get_ai_analysis(ticker, api_key):
-    if not api_key: return "⚠️ API Key Missing. Please enter it in the Settings tab.", []
-    if "sk-" not in api_key: return "⚠️ Invalid API Key format.", []
-
-    try:
-        stock = yf.Ticker(ticker)
-        raw_news = stock.news
-        headlines = []
-        if raw_news:
-            for n in raw_news[:3]:
-                if 'title' in n: headlines.append(n['title'])
-                elif 'content' in n and 'title' in n['content']: headlines.append(n['content']['title'])
-        
-        if not headlines: return f"ℹ️ No recent news found for {ticker}.", []
-
-        client = OpenAI(api_key=api_key)
-        prompt = f"Analyze these headlines for {ticker}: {headlines}. Return a 1-sentence summary and a Sentiment (Bullish/Bearish/Neutral)."
-        
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo", 
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return response.choices[0].message.content, headlines
-
-    except Exception as e:
-        return f"❌ AI Error: {str(e)}", []
-
-def send_telegram_alert(token, chat_id, msg):
-    try:
-        requests.get(f"https://api.telegram.org/bot{token}/sendMessage", params={"chat_id": chat_id, "text": msg})
-        return "✅ Sent"
-    except: return "❌ Failed"
-
-# --- 6. WATCHDOG & WATCHLIST ---
-WATCHLIST_FILE = "watchlist.txt"
-
 def get_watchlist():
     if os.path.exists(WATCHLIST_FILE):
-        with open(WATCHLIST_FILE, "r") as f:
-            return [line.strip() for line in f.readlines() if line.strip()]
+        with open(WATCHLIST_FILE, "r") as f: return [line.strip() for line in f.readlines() if line.strip()]
     return []
 
 def add_to_watchlist(ticker):
     current = get_watchlist()
     if ticker not in current:
-        with open(WATCHLIST_FILE, "a") as f:
-            f.write(f"{ticker}\n")
+        with open(WATCHLIST_FILE, "a") as f: f.write(f"{ticker}\n")
 
 def remove_from_watchlist(ticker):
     current = get_watchlist()
@@ -255,11 +271,27 @@ def remove_from_watchlist(ticker):
         with open(WATCHLIST_FILE, "w") as f:
             for t in current: f.write(f"{t}\n")
 
-# --- 7. MARKET SCANNER ---
+def get_ai_analysis(ticker, api_key):
+    if not api_key: return "⚠️ API Key Missing.", []
+    if "sk-" not in api_key: return "⚠️ Invalid Key.", []
+    try:
+        headlines = [n['title'] for n in yf.Ticker(ticker).news[:3]]
+        if not headlines: return "No recent news.", []
+        client = OpenAI(api_key=api_key)
+        prompt = f"Analyze {ticker} headlines: {headlines}. Summary & Sentiment?"
+        res = client.chat.completions.create(model="gpt-3.5-turbo", messages=[{"role":"user","content":prompt}])
+        return res.choices[0].message.content, headlines
+    except Exception as e: return f"AI Error: {e}", []
+
+def send_telegram_alert(token, chat_id, msg):
+    try:
+        requests.get(f"https://api.telegram.org/bot{token}/sendMessage", params={"chat_id": chat_id, "text": msg})
+        return "✅ Sent"
+    except: return "❌ Failed"
+
 def scan_market():
     tickers = get_watchlist()
     if not tickers: return pd.DataFrame()
-    
     results = []
     for ticker in tickers:
         try:
@@ -267,55 +299,35 @@ def scan_market():
             if data is not None:
                 processed, _, _ = train_consensus_model(data)
                 if processed is not None:
-                    last_row = processed.iloc[-1]
-                    conf = last_row['Confidence']
-                    signal = "BUY 🟢" if conf > 0.6 else "SELL 🔴" if conf < 0.4 else "WAIT ⚪"
-                    results.append({
-                        "Ticker": ticker,
-                        "Price": last_row['Close'],
-                        "Signal": signal,
-                        "Confidence": conf,
-                        "RSI": last_row['RSI']
-                    })
+                    last = processed.iloc[-1]
+                    sig = "BUY 🟢" if last['Confidence'] > 0.6 else "SELL 🔴" if last['Confidence'] < 0.4 else "WAIT ⚪"
+                    results.append({"Ticker": ticker, "Price": last['Close'], "Signal": sig, "Confidence": last['Confidence']})
         except: continue
-            
-    df = pd.DataFrame(results)
-    if not df.empty: df = df.sort_values(by="Confidence", ascending=False)
-    return df
+    return pd.DataFrame(results).sort_values(by="Confidence", ascending=False) if results else pd.DataFrame()
 
-# --- 8. BACKTESTING ENGINE ---
 def run_backtest(ticker, initial_capital=10000):
     data = get_data(ticker, period="2y")
     if data is None: return None
-    
     processed, _, _ = train_consensus_model(data)
-    
     if processed is None: return None
     
     balance = initial_capital
     shares = 0
-    equity_curve = []
+    equity = []
     trades = []
     
     for date, row in processed.iterrows():
         price = row['Close']
-        conf = row['Confidence']
-        
-        if conf > 0.65 and shares == 0:
+        if row['Confidence'] > 0.65 and shares == 0:
             shares = int(balance / price)
             balance -= shares * price
             trades.append({"Date": date, "Action": "BUY", "Price": price})
-            
-        elif conf < 0.40 and shares > 0:
+        elif row['Confidence'] < 0.40 and shares > 0:
             balance += shares * price
             shares = 0
             trades.append({"Date": date, "Action": "SELL", "Price": price})
-            
-        current_equity = balance + (shares * price)
-        equity_curve.append(current_equity)
+        equity.append(balance + (shares * price))
         
-    processed['Equity'] = equity_curve
-    final_value = equity_curve[-1]
-    total_return = ((final_value - initial_capital) / initial_capital) * 100
-    
-    return processed, pd.DataFrame(trades), total_return
+    processed['Equity'] = equity
+    final = equity[-1]
+    return processed, pd.DataFrame(trades), ((final-initial_capital)/initial_capital)*100
