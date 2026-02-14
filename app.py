@@ -9,6 +9,14 @@ st.set_page_config(layout="wide", page_title="HedgeFund Terminal", page_icon="�
 if 'auth' not in st.session_state: st.session_state['auth'] = False
 if 'pwd' not in st.session_state: st.session_state['pwd'] = "Arabella@30"
 
+# Initialize Session State for Keys (Load from secrets if available)
+if 'openai_key' not in st.session_state: 
+    st.session_state['openai_key'] = st.secrets.get("api", {}).get("openai_key", "")
+if 'tele_token' not in st.session_state: 
+    st.session_state['tele_token'] = st.secrets.get("api", {}).get("telegram_token", "")
+if 'tele_chat' not in st.session_state: 
+    st.session_state['tele_chat'] = st.secrets.get("api", {}).get("telegram_chat_id", "")
+
 def login():
     st.markdown("<h1 style='text-align: center;'>🏦 HedgeFund Terminal</h1>", unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1,2,1])
@@ -38,9 +46,6 @@ def main():
     st.sidebar.header("💷 Portfolio Settings")
     base_curr = st.sidebar.radio("Your Currency", ["GBP (£)", "USD ($)"])
     capital = st.sidebar.number_input(f"Capital ({base_curr[0]})", 10000)
-    
-    # LOAD SECRETS
-    openai_key = st.secrets.get("api", {}).get("openai_key", "")
     
     # TABS
     tabs = st.tabs([
@@ -93,6 +98,7 @@ def main():
                                 st.progress(prob, text=f"{model}: {prob*100:.0f}% Bullish")
                             
                             st.markdown("---")
+                            # Paper Trading Button
                             if st.button(f"🛒 Paper Buy {ticker}"):
                                 rate = logic.get_exchange_rate("GBP") if "GBP" in base_curr else 1.0
                                 usd_cap = capital / rate
@@ -101,10 +107,24 @@ def main():
                                 st.success(f"Bought {shares} shares! ({res})")
 
                         with c2:
-                            st.subheader("🤖 GPT-4 Insight")
+                            st.subheader("🤖 AI & Alerts")
+                            
+                            # OpenAI Analysis
                             if st.button("Analyze News"):
-                                report, _ = logic.get_ai_analysis(ticker, openai_key)
+                                report, _ = logic.get_ai_analysis(ticker, st.session_state['openai_key'])
                                 st.info(report)
+                                
+                            st.markdown("---")
+                            
+                            # Telegram Alert Button (RESTORED)
+                            if st.button("📱 Send Telegram Alert"):
+                                msg = f"🚀 *{ticker} Analysis*\nSignal: {sig}\nPrice: ${last['Close']:.2f}\nConfidence: {conf*100:.0f}%"
+                                res = logic.send_telegram_alert(st.session_state['tele_token'], st.session_state['tele_chat'], msg)
+                                if "✅" in res:
+                                    st.success(res)
+                                else:
+                                    st.error(f"{res} - Check Settings Tab!")
+
                 else:
                     st.error("Data not available. Try another ticker.")
 
@@ -238,10 +258,22 @@ def main():
         else:
             st.info("No open trades.")
 
-    # --- TAB 6: SETTINGS ---
+    # --- TAB 6: SETTINGS (RESTORED) ---
     with tabs[5]:
         st.header("⚙️ Settings")
-        st.info("API Keys loaded from secrets.toml")
+        st.info("Keys are loaded from secrets.toml if available. Otherwise, enter them here.")
+        
+        # Manual Input Backups (Updates Session State)
+        st.session_state['openai_key'] = st.text_input("OpenAI Key", 
+            value=st.session_state['openai_key'], type="password")
+            
+        st.session_state['tele_token'] = st.text_input("Telegram Token", 
+            value=st.session_state['tele_token'], type="password")
+            
+        st.session_state['tele_chat'] = st.text_input("Telegram Chat ID", 
+            value=st.session_state['tele_chat'], type="password")
+        
+        st.markdown("---")
         if st.button("Logout"):
             st.session_state['auth'] = False
             st.rerun()
