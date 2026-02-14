@@ -1,6 +1,7 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import streamlit as st # Needed for caching
 from ta.momentum import RSIIndicator
 from ta.trend import SMAIndicator
 from ta.volatility import AverageTrueRange
@@ -9,8 +10,9 @@ from sklearn.linear_model import LogisticRegression
 from openai import OpenAI
 import requests
 import os
+import plotly.graph_objects as go # Needed for Correlation Heatmap logic
 
-# --- 1. DATA & SEARCH ---
+# --- 1. DATA & SEARCH (WITH CACHING) ---
 def search_ticker(query):
     try:
         url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=10&newsCount=0"
@@ -29,6 +31,8 @@ def search_ticker(query):
     except:
         return {}
 
+# NEW: Caching added (ttl=300 means data stays saved for 5 minutes)
+@st.cache_data(ttl=300)
 def get_data(ticker, period="2y", interval="1d"):
     try:
         if interval in ['15m', '30m', '60m', '1h']: period = "1mo"
@@ -42,29 +46,21 @@ def get_data(ticker, period="2y", interval="1d"):
 
 # --- 2. MULTI-MODEL CONSENSUS AI ---
 def train_consensus_model(data):
-    """
-    Trains 3 models (Random Forest, XGBoost, LogReg) and takes a vote.
-    """
     df = data.copy()
     if 'Volume' in df.columns: df['Volume'] = df['Volume'].fillna(0)
     
-    # --- UPDATED INDICATORS (USING 'TA' LIBRARY) ---
-    # 1. RSI
     rsi_indicator = RSIIndicator(close=df["Close"], window=14)
     df["RSI"] = rsi_indicator.rsi()
     
-    # 2. SMAs
     sma_20 = SMAIndicator(close=df["Close"], window=20)
     df["SMA_20"] = sma_20.sma_indicator()
     
     sma_50 = SMAIndicator(close=df["Close"], window=50)
     df["SMA_50"] = sma_50.sma_indicator()
     
-    # 3. ATR
     atr_indicator = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=14)
     df["ATR"] = atr_indicator.average_true_range()
     
-    # Target: 1 if Price Rises in the NEXT candle
     df['Target'] = (df['Close'].shift(-1) > df['Close']).astype(int)
     
     if len(df) < 50: return None, [], {}
@@ -78,21 +74,17 @@ def train_consensus_model(data):
     train = df.iloc[:train_size]
     test = df.iloc[train_size:]
     
-    # 1. Define the 3 Models
     rf = RandomForestClassifier(n_estimators=100, min_samples_split=10, random_state=42)
     gb = GradientBoostingClassifier(n_estimators=100, learning_rate=0.1, max_depth=3, random_state=42)
     lr = LogisticRegression(solver='liblinear')
     
-    # 2. Create Voting Consensus (Soft Vote = Average Probability)
     ensemble = VotingClassifier(estimators=[('RF', rf), ('GB', gb), ('LR', lr)], voting='soft')
     ensemble.fit(train[features], train['Target'])
     
-    # 3. Predict
     probs = ensemble.predict_proba(test[features])[:, 1]
     test = test.copy()
     test['Confidence'] = probs
     
-    # Get individual votes for the "Details" view
     rf.fit(train[features], train['Target'])
     gb.fit(train[features], train['Target'])
     lr.fit(train[features], train['Target'])
@@ -108,7 +100,6 @@ def train_consensus_model(data):
 
 # --- 3. MACRO & SECTORS ---
 def get_macro_data():
-    """Fetches key economic indicators."""
     tickers = {
         "🇺🇸 10Y Yield": "^TNX",
         "💵 Dollar Index": "DX-Y.NYB",
@@ -129,7 +120,6 @@ def get_macro_data():
     return data
 
 def get_sector_heatmap():
-    """Fetches performance of major US Sector ETFs."""
     sectors = {
         "Tech": "XLK", "Finance": "XLF", "Health": "XLV", "Energy": "XLE",
         "Consumer": "XLY", "Staples": "XLP", "Industrial": "XLI", "Comms": "XLC",
@@ -188,41 +178,46 @@ def execute_trade(ticker, price_usd, shares, action, currency="USD"):
     df.to_csv(PORTFOLIO_FILE, index=False)
     return "✅ Executed"
 
-# --- 5. ALERTS & AI (FIXED) ---
-def get_ai_analysis(ticker, api_key):
-    # 1. Check Key
-    if not api_key: 
-        return "⚠️ API Key Missing. Please enter it in the Settings tab.", []
+# NEW: Risk Management (Correlation)
+def get_correlation_matrix(portfolio_df):
+    """
+    Checks how all stocks in your portfolio move together.
+    Returns a correlation matrix dataframe.
+    """
+    tickers = portfolio_df['Ticker'].unique().tolist()
+    # Need at least 2 stocks to compare
+    if len(tickers) < 2: return None
     
-    # 2. Check Quota (Optional Pre-check logic or just let OpenAI fail)
-    if "sk-" not in api_key:
-        return "⚠️ Invalid API Key format. Must start with 'sk-'.", []
+    # Download close prices for all tickers
+    closes = {}
+    for t in tickers:
+        d = get_data(t, period="6mo")
+        if d is not None:
+            closes[t] = d['Close']
+            
+    df_closes = pd.DataFrame(closes)
+    # Return Correlation Matrix (Values between -1 and 1)
+    return df_closes.corr()
+
+# --- 5. ALERTS & AI ---
+def get_ai_analysis(ticker, api_key):
+    if not api_key: return "⚠️ API Key Missing. Please enter it in the Settings tab.", []
+    if "sk-" not in api_key: return "⚠️ Invalid API Key format.", []
 
     try:
-        # 3. Robust News Fetching
         stock = yf.Ticker(ticker)
         raw_news = stock.news
-        
-        # Yahoo News sometimes hides the title, so we check multiple spots
         headlines = []
         if raw_news:
-            for n in raw_news[:3]: # Limit to top 3
-                # Try getting 'title' directly
-                if 'title' in n:
-                    headlines.append(n['title'])
-                # Try getting 'title' inside 'content' (common in new Yahoo API)
-                elif 'content' in n and 'title' in n['content']:
-                    headlines.append(n['content']['title'])
+            for n in raw_news[:3]:
+                if 'title' in n: headlines.append(n['title'])
+                elif 'content' in n and 'title' in n['content']: headlines.append(n['content']['title'])
         
-        # If no news found, don't crash the AI
-        if not headlines:
-            return f"ℹ️ No recent news found for {ticker}. AI cannot run analysis.", []
+        if not headlines: return f"ℹ️ No recent news found for {ticker}.", []
 
-        # 4. Call OpenAI (Using standard model)
         client = OpenAI(api_key=api_key)
         prompt = f"Analyze these headlines for {ticker}: {headlines}. Return a 1-sentence summary and a Sentiment (Bullish/Bearish/Neutral)."
         
-        # Switched to 'gpt-3.5-turbo' for maximum compatibility (gpt-4o sometimes requires special access)
         response = client.chat.completions.create(
             model="gpt-3.5-turbo", 
             messages=[{"role": "user", "content": prompt}]
@@ -230,7 +225,6 @@ def get_ai_analysis(ticker, api_key):
         return response.choices[0].message.content, headlines
 
     except Exception as e:
-        # This will print the EXACT error from OpenAI (e.g., Rate Limit, Quota, etc.)
         return f"❌ AI Error: {str(e)}", []
 
 def send_telegram_alert(token, chat_id, msg):
@@ -291,17 +285,13 @@ def scan_market():
 
 # --- 8. BACKTESTING ENGINE ---
 def run_backtest(ticker, initial_capital=10000):
-    """
-    Simulates trading over the last 1-2 years using the Consensus Model.
-    """
-    data = get_data(ticker, period="2y") # Fetch max history for test
+    data = get_data(ticker, period="2y")
     if data is None: return None
     
     processed, _, _ = train_consensus_model(data)
     
     if processed is None: return None
     
-    # Simulation Loop
     balance = initial_capital
     shares = 0
     equity_curve = []
@@ -311,27 +301,21 @@ def run_backtest(ticker, initial_capital=10000):
         price = row['Close']
         conf = row['Confidence']
         
-        # BUY LOGIC (High Confidence & No Position)
         if conf > 0.65 and shares == 0:
             shares = int(balance / price)
             balance -= shares * price
             trades.append({"Date": date, "Action": "BUY", "Price": price})
             
-        # SELL LOGIC (Low Confidence & Have Position)
         elif conf < 0.40 and shares > 0:
             balance += shares * price
             shares = 0
             trades.append({"Date": date, "Action": "SELL", "Price": price})
             
-        # Record Daily Equity
         current_equity = balance + (shares * price)
         equity_curve.append(current_equity)
         
     processed['Equity'] = equity_curve
-    
-    # Calculate Stats
     final_value = equity_curve[-1]
     total_return = ((final_value - initial_capital) / initial_capital) * 100
     
     return processed, pd.DataFrame(trades), total_return
-
