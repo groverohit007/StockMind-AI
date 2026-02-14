@@ -11,21 +11,41 @@ from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier,
 from sklearn.linear_model import LogisticRegression
 from openai import OpenAI
 
-# --- 1. DATA & CACHING ---
-def search_ticker(query):
+# --- 1. DATA & CACHING (UPDATED SEARCH) ---
+def search_ticker(query, region="All"):
+    """
+    Searches Yahoo Finance for tickers, filtered by region/market.
+    """
     try:
-        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=10&newsCount=0"
+        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=20&newsCount=0"
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, headers=headers)
         data = response.json()
         results = {}
+        
+        # Define Exchange Codes for Filters
+        # Yahoo Finance Exchange Codes: 
+        # NMS/NGM=NASDAQ, NYQ=NYSE, LSE=London, NSI=NSE(India), BSE=Bombay
+        filters = {
+            "USA (NASDAQ/NYSE)": ["NMS", "NYQ", "NGM", "ASE", "NCM", "PNK"],
+            "UK (LSE)": ["LSE"],
+            "India (NSE/BSE)": ["NSI", "BSE", "NS", "BO"],
+            "All": []
+        }
+        
+        allowed_exchanges = filters.get(region, [])
+
         if 'quotes' in data:
             for quote in data['quotes']:
                 symbol = quote.get('symbol')
                 name = quote.get('shortname') or quote.get('longname')
                 exch = quote.get('exchange')
-                if symbol and name:
-                    results[f"{name} ({symbol}) - {exch}"] = symbol
+                
+                # Filter Logic
+                if symbol and name and exch:
+                    if region == "All" or exch in allowed_exchanges:
+                        results[f"{name} ({symbol}) - {exch}"] = symbol
+                        
         return results
     except:
         return {}
@@ -126,7 +146,7 @@ def train_consensus_model(data):
     
     return test, features, votes
 
-# --- 4. MULTI-TIMEFRAME PREDICTIONS (NEW) ---
+# --- 4. MULTI-TIMEFRAME PREDICTIONS ---
 def predict_long_term_trends(data):
     """
     Trains lightweight models for 1W, 1M, 3M, 6M horizons.
@@ -160,7 +180,6 @@ def predict_long_term_trends(data):
         if len(temp_df) > 100:
             train_size = int(len(temp_df) * 0.9)
             train = temp_df.iloc[:train_size]
-            test = temp_df.iloc[train_size:]
             
             # Fast model
             model = RandomForestClassifier(n_estimators=50, max_depth=5, random_state=42)
@@ -174,7 +193,7 @@ def predict_long_term_trends(data):
             elif prob < 0.4: predictions[name] = "Bearish 🔴"
             else: predictions[name] = "Neutral ⚪"
         else:
-            predictions[name] = "N/A (Not enough data)"
+            predictions[name] = "N/A"
             
     return predictions
 
