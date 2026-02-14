@@ -144,3 +144,36 @@ def send_telegram_alert(token, chat_id, ticker, signal, price, timeframe):
         return "✅ Alert Sent!"
     except:
         return "❌ Failed."
+        
+        # --- 6. WATCHLIST MANAGER ---
+WATCHLIST_FILE = "watchlist.txt"
+
+def get_watchlist():
+    """Reads the watchlist from a text file."""
+    try:
+        with open(WATCHLIST_FILE, "r") as f:
+            # Read lines, strip whitespace, remove empty lines
+            return [line.strip() for line in f.readlines() if line.strip()]
+    except FileNotFoundError:
+        return []
+
+def add_to_watchlist(ticker):
+    """Adds a ticker to the file if not exists."""
+    current = get_watchlist()
+    if ticker not in current:
+        with open(WATCHLIST_FILE, "a") as f:
+            f.write(f"{ticker}\n")
+        return f"✅ {ticker} added to Watchdog."
+    return f"⚠️ {ticker} is already in Watchdog."
+
+def remove_from_watchlist(ticker):
+    """Removes a ticker from the file."""
+    current = get_watchlist()
+    if ticker in current:
+        current.remove(ticker)
+        with open(WATCHLIST_FILE, "w") as f:
+            for t in current:
+                f.write(f"{t}\n")
+        return f"🗑️ {ticker} removed."
+    return "⚠️ Ticker not found."
+
