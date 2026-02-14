@@ -1,7 +1,9 @@
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
 import numpy as np
+from ta.momentum import RSIIndicator
+from ta.trend import SMAIndicator
+from ta.volatility import AverageTrueRange
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
 from sklearn.linear_model import LogisticRegression
 from openai import OpenAI
@@ -46,11 +48,23 @@ def train_consensus_model(data):
     df = data.copy()
     if 'Volume' in df.columns: df['Volume'] = df['Volume'].fillna(0)
     
-    # Indicators
-    df['RSI'] = ta.rsi(df['Close'], length=14)
-    df['SMA_20'] = ta.sma(df['Close'], length=20)
-    df['SMA_50'] = ta.sma(df['Close'], length=50)
-    df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
+    # --- UPDATED INDICATORS (USING 'TA' LIBRARY) ---
+    # 1. RSI
+    rsi_indicator = RSIIndicator(close=df["Close"], window=14)
+    df["RSI"] = rsi_indicator.rsi()
+    
+    # 2. SMAs
+    sma_20 = SMAIndicator(close=df["Close"], window=20)
+    df["SMA_20"] = sma_20.sma_indicator()
+    
+    sma_50 = SMAIndicator(close=df["Close"], window=50)
+    df["SMA_50"] = sma_50.sma_indicator()
+    
+    # 3. ATR
+    atr_indicator = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=14)
+    df["ATR"] = atr_indicator.average_true_range()
+    
+    # Target: 1 if Price Rises in the NEXT candle
     df['Target'] = (df['Close'].shift(-1) > df['Close']).astype(int)
     
     if len(df) < 50: return None, [], {}
@@ -249,9 +263,6 @@ def run_backtest(ticker, initial_capital=10000):
     data = get_data(ticker, period="2y") # Fetch max history for test
     if data is None: return None
     
-    # Train/Predict on whole dataset to simulate "Past Performance"
-    # Note: In a rigorous academic backtest, you would use a Walk-Forward method.
-    # For a dashboard tool, we use the standard model to show theoretical fit.
     processed, _, _ = train_consensus_model(data)
     
     if processed is None: return None
