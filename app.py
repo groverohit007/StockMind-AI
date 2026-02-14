@@ -33,6 +33,20 @@ def login_screen():
 
 # --- 2. MAIN APPLICATION ---
 def main_app():
+    if data is not None:
+                market_stat = logic.get_market_status()
+                
+                # RUN MODEL WITH SAFETY CHECK
+                processed, features = logic.train_model(data)
+                
+                # NEW: Check if processed data is valid
+                if processed is None or processed.empty:
+                    st.error(f"⚠️ Not enough data to analyze {ticker}. This often happens with ETFs (like SGLN), new listings, or if the timeframe is too short.")
+                else:
+                    # ... The rest of your code runs ONLY if data is valid ...
+                    last_row = processed.iloc[-1]
+                    conf = last_row['Confidence']
+    
     # --- SIDEBAR: CONTROLS ---
     st.sidebar.header("🔍 Market Search")
     
@@ -195,3 +209,4 @@ if not st.session_state['authenticated']:
     login_screen()
 else:
     main_app()
+
