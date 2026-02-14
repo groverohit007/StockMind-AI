@@ -138,21 +138,15 @@ def get_sector_heatmap():
 PORTFOLIO_FILE = "portfolio.csv"
 
 def get_exchange_rate(base_currency="GBP"):
-    """
-    Returns USD to Base Rate. 
-    If Base is GBP, we need USD->GBP rate.
-    Standard pair is GBPUSD=X (1 GBP = x USD). So USD->GBP is 1/Rate.
-    """
     if base_currency == "USD": return 1.0
     try:
-        # Get GBPUSD
-        pair = f"{base_currency}USD=X" # e.g., GBPUSD=X
+        pair = f"{base_currency}USD=X" 
         d = yf.Ticker(pair).history(period="1d")
         if not d.empty:
-            rate = d['Close'].iloc[-1] # This is 1 GBP = 1.27 USD
-            return 1.0 / rate # Returns 0.78 (1 USD = 0.78 GBP)
+            rate = d['Close'].iloc[-1] 
+            return 1.0 / rate 
     except:
-        return 0.78 # Fallback avg
+        return 0.78 
     return 1.0
 
 def get_portfolio():
@@ -174,7 +168,6 @@ def execute_trade(ticker, price_usd, shares, action, currency="USD"):
             idx = rows.index[0]
             df.at[idx, 'Status'] = 'CLOSED'
             df.at[idx, 'Sell_Price_USD'] = price_usd
-            # P&L in USD
             pnl = (price_usd - df.at[idx, 'Buy_Price_USD']) * df.at[idx, 'Shares']
             df.at[idx, 'Profit_USD'] = pnl
             
@@ -198,48 +191,101 @@ def send_telegram_alert(token, chat_id, msg):
         return "✅ Sent"
     except: return "❌ Failed"
 
-# --- 8. MARKET SCANNER ---
+# --- 6. WATCHDOG & WATCHLIST ---
+WATCHLIST_FILE = "watchlist.txt"
+
+def get_watchlist():
+    if os.path.exists(WATCHLIST_FILE):
+        with open(WATCHLIST_FILE, "r") as f:
+            return [line.strip() for line in f.readlines() if line.strip()]
+    return []
+
+def add_to_watchlist(ticker):
+    current = get_watchlist()
+    if ticker not in current:
+        with open(WATCHLIST_FILE, "a") as f:
+            f.write(f"{ticker}\n")
+
+def remove_from_watchlist(ticker):
+    current = get_watchlist()
+    if ticker in current:
+        current.remove(ticker)
+        with open(WATCHLIST_FILE, "w") as f:
+            for t in current: f.write(f"{t}\n")
+
+# --- 7. MARKET SCANNER ---
 def scan_market():
-    """
-    Loops through the entire Watchlist, analyzes each stock,
-    and returns a ranked DataFrame of the best opportunities.
-    """
     tickers = get_watchlist()
     if not tickers: return pd.DataFrame()
     
     results = []
-    
     for ticker in tickers:
         try:
-            # Get Data (Fast mode: 1y history is enough for scanning)
             data = get_data(ticker, period="1y")
-            
-            if data is not None and not data.empty:
-                # Run the AI
-                processed, _, votes = train_consensus_model(data)
-                
+            if data is not None:
+                processed, _, _ = train_consensus_model(data)
                 if processed is not None:
                     last_row = processed.iloc[-1]
                     conf = last_row['Confidence']
-                    
-                    # Determine Signal
-                    signal = "WAIT"
-                    if conf > 0.6: signal = "BUY 🟢"
-                    elif conf < 0.4: signal = "SELL 🔴"
-                    
+                    signal = "BUY 🟢" if conf > 0.6 else "SELL 🔴" if conf < 0.4 else "WAIT ⚪"
                     results.append({
                         "Ticker": ticker,
                         "Price": last_row['Close'],
                         "Signal": signal,
                         "Confidence": conf,
-                        "RSI": last_row['RSI'],
-                        "Trend": "Up 📈" if last_row['Close'] > last_row['SMA_50'] else "Down 📉"
+                        "RSI": last_row['RSI']
                     })
-        except:
-            continue # Skip bad tickers
+        except: continue
             
-    # Convert to DataFrame and Sort by Confidence (Highest first)
     df = pd.DataFrame(results)
-    if not df.empty:
-        df = df.sort_values(by="Confidence", ascending=False)
+    if not df.empty: df = df.sort_values(by="Confidence", ascending=False)
     return df
+
+# --- 8. BACKTESTING ENGINE ---
+def run_backtest(ticker, initial_capital=10000):
+    """
+    Simulates trading over the last 1-2 years using the Consensus Model.
+    """
+    data = get_data(ticker, period="2y") # Fetch max history for test
+    if data is None: return None
+    
+    # Train/Predict on whole dataset to simulate "Past Performance"
+    # Note: In a rigorous academic backtest, you would use a Walk-Forward method.
+    # For a dashboard tool, we use the standard model to show theoretical fit.
+    processed, _, _ = train_consensus_model(data)
+    
+    if processed is None: return None
+    
+    # Simulation Loop
+    balance = initial_capital
+    shares = 0
+    equity_curve = []
+    trades = []
+    
+    for date, row in processed.iterrows():
+        price = row['Close']
+        conf = row['Confidence']
+        
+        # BUY LOGIC (High Confidence & No Position)
+        if conf > 0.65 and shares == 0:
+            shares = int(balance / price)
+            balance -= shares * price
+            trades.append({"Date": date, "Action": "BUY", "Price": price})
+            
+        # SELL LOGIC (Low Confidence & Have Position)
+        elif conf < 0.40 and shares > 0:
+            balance += shares * price
+            shares = 0
+            trades.append({"Date": date, "Action": "SELL", "Price": price})
+            
+        # Record Daily Equity
+        current_equity = balance + (shares * price)
+        equity_curve.append(current_equity)
+        
+    processed['Equity'] = equity_curve
+    
+    # Calculate Stats
+    final_value = equity_curve[-1]
+    total_return = ((final_value - initial_capital) / initial_capital) * 100
+    
+    return processed, pd.DataFrame(trades), total_return
