@@ -4,10 +4,7 @@ import numpy as np
 import streamlit as st
 import requests
 import os
-import pdfplumber
-import io
-import re
-from scipy.optimize import minimize
+from scipy.optimize import minimize # NEW IMPORT FOR OPTIMIZER
 from ta.momentum import RSIIndicator
 from ta.trend import SMAIndicator, MACD
 from ta.volatility import AverageTrueRange, BollingerBands
@@ -17,25 +14,38 @@ from openai import OpenAI
 
 # --- 1. DATA & CACHING ---
 def search_ticker(query, region="All"):
+    """
+    Searches Yahoo Finance for tickers, filtered by region/market.
+    """
     try:
         url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=20&newsCount=0"
         headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers).json()
+        response = requests.get(url, headers=headers)
+        data = response.json()
         results = {}
+        
         filters = {
             "USA (NASDAQ/NYSE)": ["NMS", "NYQ", "NGM", "ASE", "NCM", "PNK"],
             "UK (LSE)": ["LSE"],
             "India (NSE/BSE)": ["NSI", "BSE", "NS", "BO"],
             "All": []
         }
-        allowed = filters.get(region, [])
-        if 'quotes' in response:
-            for q in response['quotes']:
-                s, n, e = q.get('symbol'), q.get('shortname') or q.get('longname'), q.get('exchange')
-                if s and n and e and (region == "All" or e in allowed):
-                    results[f"{n} ({s}) - {e}"] = s
+        
+        allowed_exchanges = filters.get(region, [])
+
+        if 'quotes' in data:
+            for quote in data['quotes']:
+                symbol = quote.get('symbol')
+                name = quote.get('shortname') or quote.get('longname')
+                exch = quote.get('exchange')
+                
+                if symbol and name and exch:
+                    if region == "All" or exch in allowed_exchanges:
+                        results[f"{name} ({symbol}) - {exch}"] = symbol
+                        
         return results
-    except: return {}
+    except:
+        return {}
 
 @st.cache_data(ttl=300)
 def get_data(ticker, period="2y", interval="1d"):
@@ -43,121 +53,356 @@ def get_data(ticker, period="2y", interval="1d"):
         if interval in ['15m', '30m', '60m', '1h']: period = "1mo"
         data = yf.download(ticker, period=period, interval=interval, progress=False)
         if data.empty: return None
-        if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.get_level_values(0)
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
         return data
-    except: return None
-
-def add_technical_overlays(df):
-    df = df.copy()
-    bb = BollingerBands(close=df["Close"], window=20, window_dev=2)
-    df['BB_High'], df['BB_Low'] = bb.bollinger_hband(), bb.bollinger_lband()
-    macd = MACD(close=df["Close"], window_slow=26, window_fast=12, window_sign=9)
-    df['MACD'], df['MACD_Signal'] = macd.macd(), macd.macd_signal()
-    return df
-
-# --- 2. TRADING 212 PDF PARSER (ROBUST VERSION) ---
-def process_t212_pdf(uploaded_file):
-    """
-    Robust parser that handles different T212 layouts, currency conversion (GBX->GBP),
-    and ticker mapping.
-    """
-    def _norm(s): return re.sub(r"\s+", " ", str(s or "")).strip()
-    
-    def _to_float(num_str):
-        s = _norm(num_str).replace(":", ".").replace(",", "")
-        s = re.sub(r"[^0-9\.\-]", "", s)
-        try: return float(s)
-        except: return None
-        
-    def _infer_ticker(instrument):
-        name = _norm(instrument).upper()
-        # Look for (TICKER) pattern inside parentheses
-        m = re.search(r"\(([A-Z0-9\.\-]{1,15})\)", name)
-        if m: return m.group(1)
-        # Common T212 Name Mappings
-        map_db = {
-            "APPLE INC": "AAPL", "MICROSOFT CORP": "MSFT", "NVIDIA CORP": "NVDA",
-            "TESLA INC": "TSLA", "AMAZON.COM INC": "AMZN", "ALPHABET INC": "GOOGL",
-            "ROLLS-ROYCE HOLDINGS PLC": "RR.L", "XPENG INC": "XPEV", "NIO INC": "NIO",
-            "PALANTIR TECHNOLOGIES INC": "PLTR", "GAMESTOP CORP": "GME", "AMC ENTERTAINMENT": "AMC"
-        }
-        for k, v in map_db.items():
-            if k in name: return v
-        return name.split()[0] # Fallback to first word
-
-    extracted = []
-    try:
-        # Reset file pointer to ensure we read from start
-        uploaded_file.seek(0)
-        with pdfplumber.open(uploaded_file) as pdf:
-            for page in pdf.pages:
-                tables = page.extract_tables() or []
-                for table in tables:
-                    if not table or len(table) < 2: continue
-                    
-                    # Find header row dynamically
-                    header_idx = None
-                    for i, row in enumerate(table[:10]):
-                        joined = " | ".join(_norm(x).upper() for x in row)
-                        if "INSTRUMENT" in joined and ("QUANTITY" in joined or "QTY" in joined):
-                            header_idx = i
-                            break
-                    if header_idx is None: continue
-
-                    header = [_norm(x).upper() for x in table[header_idx]]
-                    try:
-                        c_inst = [i for i, h in enumerate(header) if "INSTRUMENT" in h or "NAME" in h][0]
-                        c_qty = [i for i, h in enumerate(header) if "QUANTITY" in h or "QTY" in h][0]
-                        # Price might be "PRICE", "AVG PRICE", etc.
-                        c_price = [i for i, h in enumerate(header) if "PRICE" in h][0]
-                    except: continue
-
-                    for row in table[header_idx + 1:]:
-                        if not row or len(row) <= max(c_inst, c_qty, c_price): continue
-                        
-                        inst = _norm(row[c_inst])
-                        if not inst or inst.upper() == "TOTAL": continue
-                        
-                        qty = _to_float(row[c_qty])
-                        if not qty or qty <= 0: continue
-                        
-                        price_txt = _norm(row[c_price]).upper()
-                        price_val = _to_float(price_txt)
-                        
-                        currency = "USD"
-                        if "GBX" in price_txt: 
-                            currency = "GBP"
-                            if price_val: price_val /= 100 # Convert pence to pounds
-                        elif "GBP" in price_txt: currency = "GBP"
-                        elif "EUR" in price_txt: currency = "EUR"
-                        
-                        ticker = _infer_ticker(inst)
-                        if ticker:
-                            extracted.append({
-                                "Ticker": ticker,
-                                "Buy_Price_USD": price_val if price_val else 0.0,
-                                "Shares": qty,
-                                "Date": pd.Timestamp.now(),
-                                "Status": "OPEN",
-                                "Currency": currency
-                            })
-        return pd.DataFrame(extracted)
-    except Exception as e:
-        print(f"PDF Error: {e}")
+    except:
         return None
 
-# --- 3. PORTFOLIO MANAGEMENT ---
-PORTFOLIO_FILE = "portfolio.csv"
+def add_technical_overlays(df):
+    """Adds Bollinger Bands and MACD for plotting."""
+    df = df.copy()
+    
+    # Bollinger Bands
+    indicator_bb = BollingerBands(close=df["Close"], window=20, window_dev=2)
+    df['BB_High'] = indicator_bb.bollinger_hband()
+    df['BB_Low'] = indicator_bb.bollinger_lband()
+    
+    # MACD
+    indicator_macd = MACD(close=df["Close"], window_slow=26, window_fast=12, window_sign=9)
+    df['MACD'] = indicator_macd.macd()
+    df['MACD_Signal'] = indicator_macd.macd_signal()
+    
+    return df
+import pdfplumber # NEW: Add to requirements.txt
 
-def get_portfolio():
-    if os.path.exists(PORTFOLIO_FILE): return pd.read_csv(PORTFOLIO_FILE)
-    return pd.DataFrame(columns=["Ticker", "Buy_Price_USD", "Shares", "Date", "Status", "Currency"])
+def process_t212_pdf(file):
+    """
+    Specifically tuned for Trading 212 'Confirmation of Holdings' PDF.
+    Extracts Instrument, Quantity, and Price across multiple pages.
+    """
+    extracted_data = []
+    try:
+        with pdfplumber.open(file) as pdf:
+            for page in pdf.pages:
+                tables = page.extract_tables()
+                for table in tables:
+                    df_tmp = pd.DataFrame(table)
+                    
+                    # Identify the correct table by checking headers in the first row
+                    if df_tmp.shape[1] >= 4 and "INSTRUMENT" in str(df_tmp.iloc[0,0]).upper():
+                        # Set headers and remove header row
+                        df_tmp.columns = ["Instrument", "ISIN", "Quantity", "Price"]
+                        df_tmp = df_tmp.iloc[1:].reset_index(drop=True)
+                        
+                        for _, row in df_tmp.iterrows():
+                            # Clean Instrument name to get Ticker (e.g., Apple Inc -> AAPL)
+                            # Note: The PDF lacks () for tickers, so we use the first word or lookup
+                            instr_name = str(row['Instrument']).split()[0].upper()
+                            
+                            # Clean Quantity (Handling cases like '27:431' or standard floats)
+                            qty_str = str(row['Quantity']).replace(':', '.').replace(',', '').strip()
+                            try:
+                                qty = float(qty_str)
+                            except:
+                                qty = 0.0
+                            
+                            # Clean Price (Handling 'USD 255.3' or 'GBX 1271')
+                            price_raw = str(row['Price']).upper()
+                            price_val = 0.0
+                            
+                            # If it's GBX (pence), convert to GBP by dividing by 100
+                            if "GBX" in price_raw:
+                                p_str = price_raw.replace("GBX", "").replace(",", "").strip()
+                                price_val = float(p_str) / 100 if p_str else 0.0
+                            else:
+                                # Standard USD/GBP/EUR
+                                p_str = price_raw.replace("USD", "").replace("GBP", "").replace("EUR", "").replace(",", "").strip()
+                                try:
+                                    price_val = float(p_str)
+                                except:
+                                    price_val = 0.0
+
+                            if instr_name and qty > 0:
+                                extracted_data.append({
+                                    "Ticker": instr_name, # Fallback to first word as ticker
+                                    "Buy_Price_USD": price_val, 
+                                    "Shares": qty,
+                                    "Date": pd.Timestamp.now(),
+                                    "Status": "OPEN",
+                                    "Currency": "GBP" if "GBX" in price_raw or "GBP" in price_raw else "USD"
+                                })
+                                
+        return pd.DataFrame(extracted_data)
+    except Exception as e:
+        print(f"Extraction Error: {e}")
+        return None
 
 def sync_portfolio_with_df(new_data_df):
+    """Overwrites or appends the portfolio with uploaded data."""
     if new_data_df is not None and not new_data_df.empty:
         new_data_df.to_csv(PORTFOLIO_FILE, index=False)
         return True
     return False
+    
+# --- 2. FUNDAMENTAL HEALTH CHECK ---
+def get_fundamentals(ticker):
+    """Fetches key financial ratios."""
+    try:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        return {
+            "Market Cap": info.get("marketCap", "N/A"),
+            "P/E Ratio": info.get("trailingPE", "N/A"),
+            "Forward P/E": info.get("forwardPE", "N/A"),
+            "Dividend Yield": info.get("dividendYield", "N/A"),
+            "Sector": info.get("sector", "Unknown"),
+            "Industry": info.get("industry", "Unknown"),
+            "Beta": info.get("beta", "N/A")
+        }
+    except:
+        return None
+
+# --- 3. CONSENSUS AI (ROBUST VERSION) ---
+def train_consensus_model(data):
+    df = data.copy()
+    if 'Volume' in df.columns: df['Volume'] = df['Volume'].fillna(0)
+    
+    # 1. Standard Indicators
+    df['RSI'] = RSIIndicator(close=df["Close"], window=14).rsi()
+    df['SMA_20'] = SMAIndicator(close=df["Close"], window=20).sma_indicator()
+    df['SMA_50'] = SMAIndicator(close=df["Close"], window=50).sma_indicator()
+    df['ATR'] = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=14).average_true_range()
+    
+    # 2. NEW: Lagged Features (Memory)
+    df['Return'] = df['Close'].pct_change()
+    df['Lag_1'] = df['Return'].shift(1) # Yesterday
+    df['Lag_2'] = df['Return'].shift(2) # 2 Days ago
+    df['Lag_5'] = df['Return'].shift(5) # Weekly trend
+
+    # 3. NEW: Robust Target (Noise Filter)
+    # Only Buy if price rises > 0.2% (covers fees/spread)
+    threshold = 0.002 
+    df['Future_Return'] = df['Close'].shift(-1) / df['Close'] - 1
+    df['Target'] = (df['Future_Return'] > threshold).astype(int)
+    
+    if len(df) < 50: return None, [], {}
+    df.dropna(inplace=True)
+    if df.empty: return None, [], {}
+    
+    # Updated Features List
+    features = ['RSI', 'SMA_20', 'SMA_50', 'ATR', 'Volume', 'Lag_1', 'Lag_2', 'Lag_5']
+    features = [f for f in features if f in df.columns]
+    
+    train_size = int(len(df) * 0.90)
+    train = df.iloc[:train_size]
+    test = df.iloc[train_size:]
+    
+    rf = RandomForestClassifier(n_estimators=100, min_samples_split=10, random_state=42)
+    gb = GradientBoostingClassifier(n_estimators=100, learning_rate=0.1, max_depth=3, random_state=42)
+    lr = LogisticRegression(solver='liblinear')
+    
+    ensemble = VotingClassifier(estimators=[('RF', rf), ('GB', gb), ('LR', lr)], voting='soft')
+    ensemble.fit(train[features], train['Target'])
+    
+    probs = ensemble.predict_proba(test[features])[:, 1]
+    test = test.copy()
+    test['Confidence'] = probs
+    
+    # Votes for display
+    rf.fit(train[features], train['Target'])
+    gb.fit(train[features], train['Target'])
+    lr.fit(train[features], train['Target'])
+    
+    last_row = test.iloc[[-1]]
+    votes = {
+        "Random Forest": rf.predict_proba(last_row[features])[:, 1][0],
+        "Gradient Boost": gb.predict_proba(last_row[features])[:, 1][0],
+        "Logistic Reg": lr.predict_proba(last_row[features])[:, 1][0]
+    }
+    
+    return test, features, votes
+
+# --- 4. MULTI-TIMEFRAME PREDICTIONS ---
+def predict_long_term_trends(data):
+    """
+    Trains lightweight models for 1W, 1M, 3M, 6M horizons.
+    """
+    df = data.copy()
+    if 'Volume' in df.columns: df['Volume'] = df['Volume'].fillna(0)
+    
+    # Simple Technicals
+    df['RSI'] = RSIIndicator(close=df["Close"], window=14).rsi()
+    df['SMA_50'] = SMAIndicator(close=df["Close"], window=50).sma_indicator()
+    df['SMA_200'] = SMAIndicator(close=df["Close"], window=200).sma_indicator()
+    
+    features = ['RSI', 'SMA_50', 'SMA_200', 'Volume']
+    features = [f for f in features if f in df.columns]
+    
+    horizons = {
+        "1 Week": 5,
+        "1 Month": 20,
+        "3 Months": 60,
+        "6 Months": 120
+    }
+    
+    predictions = {}
+    
+    for name, shift_val in horizons.items():
+        # Create specific target for this horizon
+        temp_df = df.copy()
+        temp_df['Target'] = (temp_df['Close'].shift(-shift_val) > temp_df['Close']).astype(int)
+        temp_df.dropna(inplace=True)
+        
+        if len(temp_df) > 100:
+            train_size = int(len(temp_df) * 0.9)
+            train = temp_df.iloc[:train_size]
+            
+            # Fast model
+            model = RandomForestClassifier(n_estimators=50, max_depth=5, random_state=42)
+            model.fit(train[features], train['Target'])
+            
+            # Predict on latest data
+            last_row = temp_df.iloc[[-1]]
+            prob = model.predict_proba(last_row[features])[:, 1][0]
+            
+            if prob > 0.6: predictions[name] = "Bullish 🟢"
+            elif prob < 0.4: predictions[name] = "Bearish 🔴"
+            else: predictions[name] = "Neutral ⚪"
+        else:
+            predictions[name] = "N/A"
+            
+    return predictions
+
+# --- 5. MACRO, SECTORS & RISK ---
+def get_macro_data():
+    tickers = {
+        "🇺🇸 10Y Yield": "^TNX",
+        "💵 Dollar Index": "DX-Y.NYB",
+        "🎢 VIX (Fear)": "^VIX",
+        "🛢️ Oil": "CL=F",
+        "🏆 Gold": "GC=F"
+    }
+    data = {}
+    for name, sym in tickers.items():
+        try:
+            d = yf.Ticker(sym).history(period="5d")
+            if not d.empty:
+                change = ((d['Close'].iloc[-1] - d['Close'].iloc[-2]) / d['Close'].iloc[-2]) * 100
+                data[name] = {"Price": d['Close'].iloc[-1], "Change": change}
+        except: pass
+    return data
+
+def get_sector_heatmap():
+    sectors = {
+        "Tech": "XLK", "Finance": "XLF", "Health": "XLV", "Energy": "XLE",
+        "Consumer": "XLY", "Staples": "XLP", "Real Estate": "XLRE"
+    }
+    performance = {}
+    for name, tick in sectors.items():
+        try:
+            d = yf.Ticker(tick).history(period="2d")
+            if len(d) >= 2:
+                change = ((d['Close'].iloc[-1] - d['Close'].iloc[-2]) / d['Close'].iloc[-2]) * 100
+                performance[name] = change
+            else: performance[name] = 0.0
+        except: performance[name] = 0.0
+    return performance
+
+def get_correlation_matrix(portfolio_df):
+    tickers = portfolio_df['Ticker'].unique().tolist()
+    if len(tickers) < 2: return None
+    closes = {}
+    for t in tickers:
+        d = get_data(t, period="6mo")
+        if d is not None: closes[t] = d['Close']
+    return pd.DataFrame(closes).corr()
+
+# NEW: VALUE AT RISK (VaR)
+def calculate_portfolio_var(portfolio_df, confidence_level=0.95):
+    """Calculates historical Value at Risk (95% confidence)."""
+    try:
+        tickers = portfolio_df['Ticker'].unique().tolist()
+        weights = portfolio_df['Shares'] * portfolio_df['Buy_Price_USD'] # Approx weights
+        total_value = weights.sum()
+        if total_value == 0: return 0.0
+        weights = weights / total_value
+        
+        # Get historical returns
+        data = pd.DataFrame()
+        for t in tickers:
+            df = get_data(t, period="1y")
+            if df is not None:
+                data[t] = df['Close'].pct_change()
+        
+        data.dropna(inplace=True)
+        if data.empty: return 0.0
+        
+        # Portfolio historical returns
+        data['Portfolio'] = data.dot(weights.values)
+        
+        # Calculate VaR (5th percentile of returns)
+        var_percent = np.percentile(data['Portfolio'], (1 - confidence_level) * 100)
+        var_value = abs(var_percent * total_value)
+        
+        return var_value
+    except:
+        return 0.0
+
+# NEW: PORTFOLIO OPTIMIZER (MARKOWITZ)
+def optimize_portfolio(tickers):
+    """
+    Calculates the best allocation weights (Sharpe Ratio) for a list of tickers.
+    """
+    if len(tickers) < 2: return None
+    
+    # 1. Get Data
+    data = pd.DataFrame()
+    for t in tickers:
+        df = get_data(t, period="1y")
+        if df is not None:
+            data[t] = df['Close']
+            
+    if data.empty: return None
+    
+    # 2. Calculate Returns & Covariance
+    returns = data.pct_change().dropna()
+    mean_returns = returns.mean() * 252 # Annualized
+    cov_matrix = returns.cov() * 252
+    
+    # 3. Define Optimization Function (Negative Sharpe Ratio)
+    def negative_sharpe(weights):
+        p_ret = np.sum(weights * mean_returns)
+        p_vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+        # Assuming risk-free rate ~0 for simplicity
+        return -p_ret / p_vol
+    
+    # 4. Constraints (Weights sum to 1)
+    constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
+    bounds = tuple((0, 1) for _ in range(len(tickers)))
+    init_guess = [1/len(tickers)] * len(tickers)
+    
+    # 5. Run Optimization
+    result = minimize(negative_sharpe, init_guess, method='SLSQP', bounds=bounds, constraints=constraints)
+    
+    return dict(zip(tickers, result.x))
+
+# --- 6. PORTFOLIO & ALERTS ---
+PORTFOLIO_FILE = "portfolio.csv"
+WATCHLIST_FILE = "watchlist.txt"
+
+def get_exchange_rate(base_currency="GBP"):
+    if base_currency == "USD": return 1.0
+    try:
+        pair = f"{base_currency}USD=X"
+        d = yf.Ticker(pair).history(period="1d")
+        if not d.empty: return 1.0 / d['Close'].iloc[-1]
+    except: return 0.78
+    return 1.0
+
+def get_portfolio():
+    if os.path.exists(PORTFOLIO_FILE): return pd.read_csv(PORTFOLIO_FILE)
+    return pd.DataFrame(columns=["Ticker", "Buy_Price_USD", "Shares", "Date", "Status", "Currency"])
 
 def execute_trade(ticker, price_usd, shares, action, currency="USD"):
     df = get_portfolio()
@@ -170,213 +415,92 @@ def execute_trade(ticker, price_usd, shares, action, currency="USD"):
             idx = rows.index[0]
             df.at[idx, 'Status'] = 'CLOSED'
             df.at[idx, 'Sell_Price_USD'] = price_usd
+            df.at[idx, 'Profit_USD'] = (price_usd - df.at[idx, 'Buy_Price_USD']) * df.at[idx, 'Shares']
     df.to_csv(PORTFOLIO_FILE, index=False)
     return "✅ Executed"
 
-def get_exchange_rate(base_currency="GBP"):
-    if base_currency == "USD": return 1.0
-    try:
-        # Check exchange rate
-        d = yf.Ticker(f"{base_currency}USD=X").history(period="1d")
-        return 1.0 / d['Close'].iloc[-1] if not d.empty else 0.78
-    except: return 0.78
-
-# --- 4. ROBUST AI (NOISE FILTERING + MEMORY) ---
-def train_consensus_model(data):
-    df = data.copy()
-    if 'Volume' in df.columns: df['Volume'] = df['Volume'].fillna(0)
-    
-    # Indicators
-    df['RSI'] = RSIIndicator(close=df["Close"], window=14).rsi()
-    df['SMA_20'] = SMAIndicator(close=df["Close"], window=20).sma_indicator()
-    df['SMA_50'] = SMAIndicator(close=df["Close"], window=50).sma_indicator()
-    df['ATR'] = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=14).average_true_range()
-    
-    # Lagged Features (Memory)
-    df['Lag_1'] = df['Close'].pct_change().shift(1)
-    df['Lag_2'] = df['Close'].pct_change().shift(2)
-    df['Lag_5'] = df['Close'].pct_change().shift(5)
-
-    # Noise Target (>0.2% move)
-    df['Target'] = ((df['Close'].shift(-1) / df['Close'] - 1) > 0.002).astype(int)
-    
-    df.dropna(inplace=True)
-    if len(df) < 50: return None, [], {}
-    
-    features = ['RSI', 'SMA_20', 'SMA_50', 'ATR', 'Volume', 'Lag_1', 'Lag_2', 'Lag_5']
-    features = [f for f in features if f in df.columns]
-    
-    train_size = int(len(df) * 0.90)
-    train, test = df.iloc[:train_size], df.iloc[train_size:]
-    
-    rf = RandomForestClassifier(n_estimators=100, random_state=42).fit(train[features], train['Target'])
-    gb = GradientBoostingClassifier(n_estimators=100, random_state=42).fit(train[features], train['Target'])
-    lr = LogisticRegression(solver='liblinear').fit(train[features], train['Target'])
-    
-    test = test.copy()
-    # Average probability
-    test['Confidence'] = (rf.predict_proba(test[features])[:,1] + gb.predict_proba(test[features])[:,1] + lr.predict_proba(test[features])[:,1]) / 3
-    
-    last_row = test.iloc[[-1]]
-    votes = {
-        "Random Forest": rf.predict_proba(last_row[features])[:,1][0],
-        "Gradient Boost": gb.predict_proba(last_row[features])[:,1][0],
-        "Logistic Reg": lr.predict_proba(last_row[features])[:,1][0]
-    }
-    return test, features, votes
-
-# --- 5. RESTORED FUNCTIONS (Forecast, Optimizer, VaR, Alerts, Backtest) ---
-def predict_long_term_trends(data):
-    """Predicts 1W, 1M, 3M, 6M trends."""
-    df = data.copy()
-    horizons = {"1 Week": 5, "1 Month": 20, "3 Months": 60, "6 Months": 120}
-    preds = {}
-    
-    # We use simple price change logic if ML data is insufficient
-    for k, v in horizons.items():
-        if len(df) > v:
-            change = (df['Close'].iloc[-1] / df['Close'].iloc[-v] - 1)
-            preds[k] = "Bullish 🟢" if change > 0.02 else "Bearish 🔴" if change < -0.02 else "Neutral ⚪"
-        else:
-            preds[k] = "N/A"
-    return preds
-
-def optimize_portfolio(tickers):
-    if len(tickers) < 2: return None
-    data = pd.DataFrame()
-    for t in tickers:
-        df = get_data(t, period="1y")
-        if df is not None: data[t] = df['Close']
-    if data.empty: return None
-    
-    returns = data.pct_change().dropna()
-    mean_ret = returns.mean() * 252
-    cov_mat = returns.cov() * 252
-    
-    def neg_sharpe(w):
-        p_ret = np.sum(w * mean_ret)
-        p_vol = np.sqrt(np.dot(w.T, np.dot(cov_mat, w)))
-        return -p_ret / p_vol
-        
-    cons = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
-    bounds = tuple((0, 1) for _ in range(len(tickers)))
-    init = [1/len(tickers)] * len(tickers)
-    
-    try:
-        res = minimize(neg_sharpe, init, method='SLSQP', bounds=bounds, constraints=cons)
-        return dict(zip(tickers, res.x))
-    except: return None
-
-def calculate_portfolio_var(portfolio_df, confidence=0.95):
-    try:
-        tickers = portfolio_df['Ticker'].unique().tolist()
-        total_val = (portfolio_df['Shares'] * portfolio_df['Buy_Price_USD']).sum()
-        
-        data = pd.DataFrame()
-        for t in tickers:
-            d = get_data(t, period="1y")
-            if d is not None: data[t] = d['Close'].pct_change()
-        
-        data.dropna(inplace=True)
-        # Calculate weights based on current holdings
-        weights = (portfolio_df.groupby('Ticker')['Shares'].sum() * portfolio_df.groupby('Ticker')['Buy_Price_USD'].mean()) / total_val
-        
-        # Ensure alignment
-        common = [c for c in data.columns if c in weights.index]
-        if not common: return 0.0
-        
-        weights = weights[common]
-        data = data[common]
-        
-        port_ret = data.dot(weights.values)
-        var_pct = np.percentile(port_ret, (1-confidence)*100)
-        return abs(var_percent * total_val)
-    except: return 0.0
-
-def get_correlation_matrix(portfolio_df):
-    try:
-        tickers = portfolio_df['Ticker'].unique().tolist()
-        data = pd.DataFrame()
-        for t in tickers:
-            d = get_data(t, period="6mo")
-            if d is not None: data[t] = d['Close']
-        return data.dropna().corr()
-    except: return None
-
-def get_fundamentals(ticker):
-    try:
-        info = yf.Ticker(ticker).info
-        return {
-            "Market Cap": info.get("marketCap", 0), "P/E Ratio": info.get("trailingPE", "N/A"),
-            "Beta": info.get("beta", "N/A"), "Dividend Yield": info.get("dividendYield", 0),
-            "Sector": info.get("sector", "Unknown"), "Industry": info.get("industry", "Unknown")
-        }
-    except: return None
-
-def get_macro_data():
-    tickers = {"🇺🇸 10Y Yield": "^TNX", "💵 DXY": "DX-Y.NYB", "🎢 VIX": "^VIX", "🛢️ Oil": "CL=F", "🏆 Gold": "GC=F"}
-    data = {}
-    for n, s in tickers.items():
-        try:
-            d = yf.Ticker(s).history(period="2d")
-            chg = ((d['Close'].iloc[-1]/d['Close'].iloc[-2])-1)*100
-            data[n] = {"Price": d['Close'].iloc[-1], "Change": chg}
-        except: pass
-    return data
-
-def get_sector_heatmap():
-    s = {"Tech": "XLK", "Finance": "XLF", "Energy": "XLE", "Health": "XLV", "Consumer": "XLY"}
-    return {k: yf.Ticker(v).history(period="2d")['Close'].pct_change().iloc[-1]*100 for k, v in s.items()}
-
-# --- 6. EXTRAS (Watchlist, Alerts, Backtest) ---
 def get_watchlist():
-    if os.path.exists("watchlist.txt"):
-        with open("watchlist.txt", "r") as f: return [l.strip() for l in f.readlines() if l.strip()]
+    if os.path.exists(WATCHLIST_FILE):
+        with open(WATCHLIST_FILE, "r") as f: return [line.strip() for line in f.readlines() if line.strip()]
     return []
 
-def add_to_watchlist(t):
-    if t not in get_watchlist():
-        with open("watchlist.txt", "a") as f: f.write(f"{t}\n")
+def add_to_watchlist(ticker):
+    current = get_watchlist()
+    if ticker not in current:
+        with open(WATCHLIST_FILE, "a") as f: f.write(f"{ticker}\n")
 
-def remove_from_watchlist(t):
-    wl = get_watchlist()
-    if t in wl:
-        wl.remove(t)
-        with open("watchlist.txt", "w") as f: [f.write(f"{x}\n") for x in wl]
+def remove_from_watchlist(ticker):
+    current = get_watchlist()
+    if ticker in current:
+        current.remove(ticker)
+        with open(WATCHLIST_FILE, "w") as f:
+            for t in current: f.write(f"{t}\n")
 
 def get_ai_analysis(ticker, api_key):
     if not api_key: return "⚠️ API Key Missing.", []
+    if "sk-" not in api_key: return "⚠️ Invalid Key.", []
+    
     try:
-        headlines = [n['title'] for n in yf.Ticker(ticker).news[:3]]
-        client = OpenAI(api_key=api_key)
-        res = client.chat.completions.create(model="gpt-3.5-turbo", messages=[{"role":"user","content":f"Analyze {ticker} based on {headlines}. Sentiment?"}])
-        return res.choices[0].message.content, headlines
-    except: return "AI Error", []
+        # 1. Get News safely
+        stock = yf.Ticker(ticker)
+        news_list = stock.news
+        headlines = []
+        
+        # 2. Extract Titles (Bulletproof Method)
+        if news_list:
+            for n in news_list[:3]:
+                # Method A: Standard 'title' key
+                if 'title' in n:
+                    headlines.append(n['title'])
+                # Method B: Nested inside 'content' (New Yahoo Format)
+                elif 'content' in n and 'title' in n['content']:
+                    headlines.append(n['content']['title'])
+        
+        if not headlines: 
+            return f"ℹ️ No news headlines found for {ticker}.", []
 
-def send_telegram_alert(token, cid, msg):
-    try: requests.get(f"https://api.telegram.org/bot{token}/sendMessage", params={"chat_id": cid, "text": msg})
-    except: pass
+        # 3. Call AI
+        client = OpenAI(api_key=api_key)
+        prompt = f"Analyze these headlines for {ticker}: {headlines}. Summary & Sentiment?"
+        
+        res = client.chat.completions.create(
+            model="gpt-3.5-turbo", 
+            messages=[{"role":"user","content":prompt}]
+        )
+        return res.choices[0].message.content, headlines
+
+    except Exception as e:
+        return f"AI Error: {str(e)}", []
+
+def send_telegram_alert(token, chat_id, msg):
+    try:
+        requests.get(f"https://api.telegram.org/bot{token}/sendMessage", params={"chat_id": chat_id, "text": msg})
+        return "✅ Sent"
+    except: return "❌ Failed"
 
 def scan_market():
-    wl = get_watchlist()
-    res = []
-    for t in wl:
-        d = get_data(t)
-        if d is not None:
-            p, _, _ = train_consensus_model(d)
-            if p is not None:
-                last = p.iloc[-1]
-                sig = "BUY 🟢" if last['Confidence'] > 0.6 else "SELL 🔴" if last['Confidence'] < 0.4 else "WAIT ⚪"
-                res.append({"Ticker": t, "Price": last['Close'], "Signal": sig, "Confidence": last['Confidence']})
-    return pd.DataFrame(res)
+    tickers = get_watchlist()
+    if not tickers: return pd.DataFrame()
+    results = []
+    for ticker in tickers:
+        try:
+            data = get_data(ticker, period="1y")
+            if data is not None:
+                processed, _, _ = train_consensus_model(data)
+                if processed is not None:
+                    last = processed.iloc[-1]
+                    sig = "BUY 🟢" if last['Confidence'] > 0.6 else "SELL 🔴" if last['Confidence'] < 0.4 else "WAIT ⚪"
+                    results.append({"Ticker": ticker, "Price": last['Close'], "Signal": sig, "Confidence": last['Confidence']})
+        except: continue
+    return pd.DataFrame(results).sort_values(by="Confidence", ascending=False) if results else pd.DataFrame()
 
-def run_backtest(ticker, capital):
+def run_backtest(ticker, initial_capital=10000):
     data = get_data(ticker, period="2y")
-    if data is None: return None, None, 0
+    if data is None: return None
     processed, _, _ = train_consensus_model(data)
-    if processed is None: return None, None, 0
+    if processed is None: return None
     
-    balance = capital
+    balance = initial_capital
     shares = 0
     equity = []
     trades = []
@@ -394,5 +518,7 @@ def run_backtest(ticker, capital):
         equity.append(balance + (shares * price))
         
     processed['Equity'] = equity
-    final_ret = ((equity[-1] - capital) / capital) * 100
-    return processed, pd.DataFrame(trades), final_ret
+    final = equity[-1]
+    return processed, pd.DataFrame(trades), ((final-initial_capital)/initial_capital)*100
+
+
