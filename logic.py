@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import pdfplumber
 import re
+import time
 import streamlit as st
 import requests
 import os
@@ -99,19 +100,21 @@ def process_t212_pdf(file):
                     header_index = -1
                     for idx, row in df_tmp.iterrows():
                         row_str = " ".join([str(x).upper() for x in row])
-                        if "INSTRUMENT" in row_str: # Relaxed check
+                        # Look for both INSTRUMENT and ISIN to be sure
+                        if "INSTRUMENT" in row_str and "ISIN" in row_str:
                             header_index = idx
                             break
                     
                     if header_index != -1:
                         # Found a table! Process it.
-                        # Clean headers: Remove newlines, quotes, spaces
                         headers = [str(c).replace('\n', '').replace('"', '').strip().upper() for c in df_tmp.iloc[header_index]]
                         
                         try:
                             # Map columns dynamically
                             idx_inst = headers.index("INSTRUMENT")
-                            # Look for Quantity (might be 'QTY' or 'QUANTITY')
+                            # Find ISIN column
+                            idx_isin = next(i for i, h in enumerate(headers) if "ISIN" in h)
+                            # Look for Quantity 
                             idx_qty = next(i for i, h in enumerate(headers) if "QUANTITY" in h or "QTY" in h)
                             # Look for Price
                             idx_price = next(i for i, h in enumerate(headers) if "PRICE" in h)
@@ -119,24 +122,41 @@ def process_t212_pdf(file):
 
                         # Process Data Rows
                         for _, row in df_tmp.iloc[header_index+1:].iterrows():
-                            # clean_cell helper to remove " and \n
+                            # Helper to clean cell values
                             def clean_cell(val):
                                 return str(val).replace('"', '').replace('\n', '').strip()
 
                             full_name = clean_cell(row[idx_inst])
+                            isin_code = clean_cell(row[idx_isin]) # Extract ISIN
+
                             if not full_name or full_name == "None": continue
 
-                            # Ticker Lookup
-                            found_ticker = search_ticker(full_name)
-                            ticker = list(found_ticker.values())[0] if found_ticker else full_name.split()[0].upper()
+                            # --- NEW: ISIN PRIORITY LOOKUP ---
+                            ticker = None
+                            
+                            # 1. Try searching by ISIN first (Most Accurate)
+                            if isin_code and len(isin_code) > 5:
+                                isin_results = search_ticker(isin_code)
+                                if isin_results:
+                                    # Take the first result (Best Match)
+                                    ticker = list(isin_results.values())[0]
+                            
+                            # 2. If ISIN fails, try searching by Name
+                            if not ticker:
+                                name_results = search_ticker(full_name)
+                                if name_results:
+                                    ticker = list(name_results.values())[0]
+                                else:
+                                    # 3. Fallback: Use first word of name
+                                    ticker = full_name.split()[0].upper()
 
-                            # Quantity (Handle 27:431 format)
+                            # Quantity Cleaning
                             qty_str = clean_cell(row[idx_qty]).replace(':', '.').replace(',', '')
                             try:
                                 qty = float(qty_str)
                             except: continue
 
-                            # Price (Handle 'USD 255.3' or 'GBX 123')
+                            # Price Cleaning
                             price_raw = clean_cell(row[idx_price]).upper()
                             p_str = "".join(c for c in price_raw if c.isdigit() or c in '.-')
                             try:
@@ -144,7 +164,7 @@ def process_t212_pdf(file):
                                 if "GBX" in price_raw: price_val /= 100
                             except: price_val = 0.0
 
-                            if qty > 0:
+                            if qty > 0 and ticker:
                                 extracted_data.append({
                                     "Ticker": ticker,
                                     "Buy_Price_USD": price_val,
@@ -153,28 +173,32 @@ def process_t212_pdf(file):
                                     "Status": "OPEN",
                                     "Currency": "GBP" if "GBP" in price_raw or "GBX" in price_raw else "USD"
                                 })
-                                continue # Successfully added row, move to next
+                                continue 
 
-                # STRATEGY 2: Fallback Raw Text Parsing (If tables failed)
-                # Your PDF text is very structured (CSV-like), so we can Regex it.
+                # STRATEGY 2: Fallback Regex Parsing (Updated for ISIN)
                 if not extracted_data:
                     text = page.extract_text()
                     lines = text.split('\n')
                     for line in lines:
                         # Regex to find: "Name","ISIN","Qty","Price"
-                        # Pattern looks for 3 or 4 quoted groups
-                        # Example: "Apple Inc","US03...","8.16","USD 255"
-                        match = re.search(r'"(.+?)","(.*?)"?,"([\d:.,]+?)","([A-Z]{3}\s?[\d.]+?)"', line)
+                        # Matches: "Apple Inc","US0378331005","8.16","USD 255"
+                        match = re.search(r'"(.+?)","([A-Z0-9]{9,12})","([\d:.,]+?)","([A-Z]{3}\s?[\d.]+?)"', line)
                         
                         if match:
                             full_name = match.group(1).replace('\n', '').strip()
-                            # Group 2 is ISIN (skip)
+                            isin_code = match.group(2).strip()
                             qty_str = match.group(3).replace(':', '.').replace(',', '')
                             price_raw = match.group(4)
                             
-                            # (Reuse Ticker/Qty/Price logic)
-                            found_ticker = search_ticker(full_name)
-                            ticker = list(found_ticker.values())[0] if found_ticker else full_name.split()[0].upper()
+                            # Logic Reuse: ISIN -> Name -> Fallback
+                            ticker = None
+                            if isin_code:
+                                res = search_ticker(isin_code)
+                                if res: ticker = list(res.values())[0]
+                            
+                            if not ticker:
+                                res = search_ticker(full_name)
+                                ticker = list(res.values())[0] if res else full_name.split()[0].upper()
                             
                             try: qty = float(qty_str)
                             except: qty = 0
@@ -193,13 +217,13 @@ def process_t212_pdf(file):
                                 })
 
         if not extracted_data:
-            st.error("Debug: scanned PDF but found no assets. The format might be encrypted or image-based.")
+            print("Debug: No assets found in PDF.")
             return None
             
         return pd.DataFrame(extracted_data)
 
     except Exception as e:
-        st.error(f"Critical PDF Error: {e}")
+        print(f"Critical PDF Error: {e}")
         return None
 
 def sync_portfolio_with_df(new_data_df):
@@ -627,6 +651,7 @@ def run_watchdog_scan(tele_token, tele_chat, threshold=0.7):
         return f"✅ Sent {alerts_sent} alerts to Telegram!"
     else:
         return "🐶 Watchdog scanned. No significant moves detected."
+
 
 
 
