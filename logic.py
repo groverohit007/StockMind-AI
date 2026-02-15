@@ -259,74 +259,103 @@ def get_fundamentals(ticker):
 
 # --- 3. CONSENSUS AI (ROBUST VERSION) ---
 def train_consensus_model(data):
+    """
+    Trains an ensemble (RF + GB + LR) on technical features.
+
+    Returns a 3-tuple to match app.py:
+      (processed_df_or_None, features_list, votes_dict)
+
+    processed_df includes indicators and a 'Confidence' column (bullish probability).
+    votes includes per-model bullish probability for the latest bar.
+    """
+    if data is None or getattr(data, "empty", True):
+        return None, [], {}
+
     df = data.copy()
-    if 'Volume' in df.columns:
-        df['Volume'] = df['Volume'].fillna(0)
 
-    # 1. Standard Indicators
-    df['RSI'] = RSIIndicator(close=df["Close"], window=14).rsi()
-    df['SMA_20'] = SMAIndicator(close=df["Close"], window=20).sma_indicator()
-    df['SMA_50'] = SMAIndicator(close=df["Close"], window=50).sma_indicator()
-    df['ATR'] = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=14).average_true_range()
+    required_cols = {"Close", "High", "Low"}
+    if not required_cols.issubset(set(df.columns)):
+        return None, [], {}
 
-    # 2. NEW: Lagged Features (Memory)
-    df['Return'] = df['Close'].pct_change()
-    df['Lag_1'] = df['Return'].shift(1)  # Yesterday
-    df['Lag_2'] = df['Return'].shift(2)  # 2 Days ago
-    df['Lag_5'] = df['Return'].shift(5)  # Weekly trend
+    if "Volume" in df.columns:
+        df["Volume"] = df["Volume"].fillna(0)
 
-    # 3. NEW: Robust Target (Noise Filter)
+    # Indicators
+    df["RSI"] = RSIIndicator(close=df["Close"], window=14).rsi()
+    df["SMA_20"] = SMAIndicator(close=df["Close"], window=20).sma_indicator()
+    df["SMA_50"] = SMAIndicator(close=df["Close"], window=50).sma_indicator()
+    df["ATR"] = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=14).average_true_range()
+
+    # Lagged returns
+    df["Return"] = df["Close"].pct_change()
+    df["Lag_1"] = df["Return"].shift(1)
+    df["Lag_2"] = df["Return"].shift(2)
+    df["Lag_5"] = df["Return"].shift(5)
+
+    # Target (noise-filtered)
     threshold = 0.002
-    df['Future_Return'] = df['Close'].shift(-1) / df['Close'] - 1
-    df['Target'] = (df['Future_Return'] > threshold).astype(int)
+    df["Future_Return"] = df["Close"].shift(-1) / df["Close"] - 1
+    df["Target"] = (df["Future_Return"] > threshold).astype(int)
 
-    if len(df) < 50:
-        return None
+    # Enough samples?
+    if len(df) < 60:
+        return None, [], {}
 
     df = df.dropna()
-    if df.empty:
-        return None
+    if df.empty or len(df) < 50:
+        return None, [], {}
 
-    features = ['RSI', 'SMA_20', 'SMA_50', 'ATR', 'Lag_1', 'Lag_2', 'Lag_5']
+    features = ["RSI", "SMA_20", "SMA_50", "ATR", "Lag_1", "Lag_2", "Lag_5"]
     X = df[features]
-    y = df['Target']
+    y = df["Target"]
 
     rf = RandomForestClassifier(n_estimators=200, random_state=42)
     gb = GradientBoostingClassifier(random_state=42)
     lr = LogisticRegression(max_iter=1000)
 
     ensemble = VotingClassifier(
-        estimators=[('rf', rf), ('gb', gb), ('lr', lr)],
-        voting='soft'
+        estimators=[("rf", rf), ("gb", gb), ("lr", lr)],
+        voting="soft"
     )
 
-    ensemble.fit(X, y)
-    return ensemble, features
+    try:
+        ensemble.fit(X, y)
+    except Exception:
+        return None, [], {}
+
+    # Per-row confidence
+    try:
+        df["Confidence"] = ensemble.predict_proba(X)[:, 1]
+    except Exception:
+        df["Confidence"] = np.nan
+
+    # Latest votes (for UI)
+    votes = {}
+    try:
+        x_last = X.iloc[[-1]]
+        for name, est in ensemble.named_estimators_.items():
+            try:
+                votes[name.upper()] = float(est.predict_proba(x_last)[0][1])
+            except Exception:
+                pass
+        try:
+            votes["ENSEMBLE"] = float(ensemble.predict_proba(x_last)[0][1])
+        except Exception:
+            pass
+    except Exception:
+        votes = {}
+
+    return df, features, votes
 
 def get_ai_signal(data):
-    model_bundle = train_consensus_model(data)
-    if model_bundle is None:
+    processed, features, _votes = train_consensus_model(data)
+    if processed is None or processed.empty:
         return "HOLD"
 
-    model, features = model_bundle
-    latest = data.copy()
-
-    latest['RSI'] = RSIIndicator(close=latest["Close"], window=14).rsi()
-    latest['SMA_20'] = SMAIndicator(close=latest["Close"], window=20).sma_indicator()
-    latest['SMA_50'] = SMAIndicator(close=latest["Close"], window=50).sma_indicator()
-    latest['ATR'] = AverageTrueRange(high=latest["High"], low=latest["Low"], close=latest["Close"], window=14).average_true_range()
-
-    latest['Return'] = latest['Close'].pct_change()
-    latest['Lag_1'] = latest['Return'].shift(1)
-    latest['Lag_2'] = latest['Return'].shift(2)
-    latest['Lag_5'] = latest['Return'].shift(5)
-
-    latest = latest.dropna()
-    if latest.empty:
+    # Latest probability from processed (already computed)
+    prob = float(processed["Confidence"].iloc[-1]) if "Confidence" in processed.columns else None
+    if prob is None or np.isnan(prob):
         return "HOLD"
-
-    X_latest = latest[features].iloc[[-1]]
-    prob = model.predict_proba(X_latest)[0][1]
 
     if prob > 0.60:
         return "BUY"
@@ -334,6 +363,7 @@ def get_ai_signal(data):
         return "SELL"
     else:
         return "HOLD"
+
 
 
 # --- 4. TRADING STRATEGIES ---
