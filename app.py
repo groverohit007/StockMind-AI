@@ -252,6 +252,24 @@ def main():
     # --- TAB 5: PORTFOLIO ---
     with tabs[4]:
         st.header(f"💼 Paper Portfolio ({base_curr})")
+
+        # --- NEW: UPLOAD & SYNC SECTION ---
+        st.subheader("📤 Sync Trading 212 Assets")
+        c1, c2 = st.columns([2, 1])
+        
+        uploaded_file = c1.file_uploader("Upload Trading 212 PDF Statement", type="pdf")
+        
+        if uploaded_file is not None:
+            if c2.button("Sync & Update Portfolio"):
+                with st.spinner("Reading PDF and Syncing assets..."):
+                    new_assets = logic.process_t212_pdf(uploaded_file)
+                    if new_assets is not None and not new_assets.empty:
+                        success = logic.sync_portfolio_with_df(new_assets)
+                        if success:
+                            st.success(f"Successfully synced {len(new_assets)} assets!")
+                            st.rerun()
+                    else:
+                        st.error("Could not find valid assets in the PDF. Check the format.")
         
         with st.expander("📓 Trading Journal"):
             note = st.text_area("Why did you trade?", placeholder="e.g. AI Conf 80%...")
@@ -341,3 +359,4 @@ def main():
         if st.button("Logout"): st.session_state['auth'] = False; st.rerun()
 
 main()
+
