@@ -264,12 +264,15 @@ def main():
                 with st.spinner("Reading PDF and Syncing assets..."):
                     new_assets = logic.process_t212_pdf(uploaded_file)
                     if new_assets is not None and not new_assets.empty:
-                        success = logic.sync_portfolio_with_df(new_assets)
-                        if success:
-                            st.success(f"Successfully synced {len(new_assets)} assets!")
-                            st.rerun()
-                    else:
-                        st.error("Could not find valid assets in the PDF. Check the format.")
+    success = logic.sync_portfolio_with_df(new_assets)
+    if success:
+        st.success(f"Successfully synced {len(new_assets)} assets!")
+        time.sleep(1) # Add a tiny pause so you can see the success message
+        st.rerun()
+else:
+    # The function inside logic.py will now print its own specific errors, 
+    # so we can simplify this generic message:
+    st.warning("No assets imported. Please check the 'Debug' error above.")
         
         with st.expander("📓 Trading Journal"):
             note = st.text_area("Why did you trade?", placeholder="e.g. AI Conf 80%...")
