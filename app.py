@@ -356,6 +356,26 @@ def main():
         st.session_state['openai_key'] = st.text_input("OpenAI Key", st.session_state['openai_key'], type="password")
         st.session_state['tele_token'] = st.text_input("Tele Token", st.session_state['tele_token'], type="password")
         st.session_state['tele_chat'] = st.text_input("Tele Chat ID", st.session_state['tele_chat'], type="password")
+        st.markdown("---")
+        st.subheader("🐶 Portfolio Watchdog")
+        st.caption("Scan your synced portfolio for AI signals and get Telegram alerts.")
+        
+        c1, c2 = st.columns([1, 1])
+        threshold = c1.slider("AI Confidence Threshold", 0.5, 0.95, 0.75, help="Only alert if AI is this sure.")
+        
+        if c2.button("🚀 Run Watchdog Scan Now"):
+            if not st.session_state['tele_token'] or not st.session_state['tele_chat']:
+                st.error("⚠️ Please save Telegram Token & Chat ID first!")
+            else:
+                with st.spinner("🐶 Sniffing the market..."):
+                    result = logic.run_watchdog_scan(
+                        st.session_state['tele_token'], 
+                        st.session_state['tele_chat'], 
+                        threshold
+                    )
+                    if "✅" in result: st.success(result)
+                    else: st.info(result)
         if st.button("Logout"): st.session_state['auth'] = False; st.rerun()
 
 main()
+
