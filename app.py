@@ -249,7 +249,7 @@ def main():
             color = "green" if c > 0 else "red"
             cols[i%4].markdown(f"<div style='background:{'#1e3d1e' if c>0 else '#3d1e1e'};padding:10px;border-radius:5px;text-align:center'><b>{s}</b><br><span style='color:{color}'>{c:+.2f}%</span></div>", unsafe_allow_html=True)
 
-    # --- TAB 5: PORTFOLIO ---
+# --- TAB 5: PORTFOLIO ---
     with tabs[4]:
         st.header(f"💼 Paper Portfolio ({base_curr})")
 
@@ -259,25 +259,33 @@ def main():
         
         uploaded_file = c1.file_uploader("Upload Trading 212 PDF Statement", type="pdf")
         
+        # Only show the Sync button if a file is uploaded
         if uploaded_file is not None:
             if c2.button("Sync & Update Portfolio"):
                 with st.spinner("Reading PDF and Syncing assets..."):
+                    # Process the PDF
                     new_assets = logic.process_t212_pdf(uploaded_file)
+                    
+                    # Check if assets were found
                     if new_assets is not None and not new_assets.empty:
-    success = logic.sync_portfolio_with_df(new_assets)
-    if success:
-        st.success(f"Successfully synced {len(new_assets)} assets!")
-        time.sleep(1) # Add a tiny pause so you can see the success message
-        st.rerun()
-else:
-    # The function inside logic.py will now print its own specific errors, 
-    # so we can simplify this generic message:
-    st.warning("No assets imported. Please check the 'Debug' error above.")
-        
+                        success = logic.sync_portfolio_with_df(new_assets)
+                        
+                        if success:
+                            st.success(f"Successfully synced {len(new_assets)} assets!")
+                            # Add a small delay so the user sees the success message before reload
+                            import time
+                            time.sleep(1) 
+                            st.rerun()
+                    else:
+                        # If logic.py returned None or empty DF, show warning
+                        st.warning("No assets imported. Please check the 'Debug' error above.")
+
+        # --- TRADING JOURNAL ---
         with st.expander("📓 Trading Journal"):
             note = st.text_area("Why did you trade?", placeholder="e.g. AI Conf 80%...")
             if st.button("Save Note"): st.success("Saved!")
         
+        # --- PORTFOLIO DISPLAY ---
         df = logic.get_portfolio()
         if not df.empty and not df[df['Status']=='OPEN'].empty:
             rate = logic.get_exchange_rate("GBP") if "GBP" in base_curr else 1.0
@@ -289,8 +297,10 @@ else:
             hdr[0].write("**Ticker**"); hdr[1].write("**Shares**"); hdr[2].write("**Cost**"); hdr[3].write("**Value**"); hdr[4].write("**Action**")
             
             for i, row in open_pos.iterrows():
+                # Fetch live price or fallback to buy price
                 live = logic.get_data(row['Ticker'], period="1d", interval="1m")
                 price = live['Close'].iloc[-1] if live is not None else row['Buy_Price_USD']
+                
                 val_base = (price * row['Shares']) * rate
                 cost_base = (row['Buy_Price_USD'] * row['Shares']) * rate
                 pnl = val_base - cost_base
@@ -301,6 +311,8 @@ else:
                 c[1].write(f"{row['Shares']}")
                 c[2].write(f"{base_curr[0]}{cost_base/row['Shares']:.2f}")
                 c[3].write(f"{base_curr[0]}{val_base:.2f} (: {'green' if pnl>0 else 'red'}[{pnl:+.2f}])")
+                
+                # Unique key for each button to prevent UI errors
                 if c[4].button("Sell", key=f"s_{i}"):
                     logic.execute_trade(row['Ticker'], price, 0, "SELL")
                     st.rerun()
@@ -381,4 +393,5 @@ else:
         if st.button("Logout"): st.session_state['auth'] = False; st.rerun()
 
 main()
+
 
