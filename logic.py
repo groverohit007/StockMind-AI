@@ -77,67 +77,101 @@ def add_technical_overlays(df):
 import pdfplumber # NEW: Add to requirements.txt
 
 def process_t212_pdf(file):
-    """
-    Parses Trading 212 PDF, cleans headers, and automatically finds Tickers for Company Names.
-    """
     extracted_data = []
+    debug_log = [] # To help us see what's happening
+    
     try:
         with pdfplumber.open(file) as pdf:
-            for page in pdf.pages:
+            for i, page in enumerate(pdf.pages):
                 tables = page.extract_tables()
+                
+                # DEBUG: Check if tables are found
+                if not tables:
+                    print(f"Page {i+1}: No tables found.")
+                    continue
+                
                 for table in tables:
-                    if not table or len(table) < 2: continue
-                    
                     df_tmp = pd.DataFrame(table)
-                    # 1. Normalize Headers (Remove newlines/spaces)
-                    headers = [str(c).strip().replace('\n', '').upper() for c in df_tmp.iloc[0]]
                     
-                    if "INSTRUMENT" in headers:
+                    # --- DYNAMIC HEADER SEARCH ---
+                    # Instead of assuming row 0 is header, we search for the row containing "INSTRUMENT"
+                    header_index = -1
+                    for idx, row in df_tmp.iterrows():
+                        # Convert entire row to string, clean quotes and spaces, check for keyword
+                        row_str = " ".join([str(x).upper() for x in row])
+                        if "INSTRUMENT" in row_str and "QUANTITY" in row_str:
+                            header_index = idx
+                            break
+                    
+                    if header_index == -1:
+                        continue # Skip tables that aren't the portfolio list
+                        
+                    # Set the found row as header
+                    headers = [str(c).replace('\n', '').replace('"', '').strip().upper() for c in df_tmp.iloc[header_index]]
+                    
+                    # Map Columns
+                    try:
                         idx_inst = headers.index("INSTRUMENT")
                         idx_qty = headers.index("QUANTITY")
                         idx_price = headers.index("PRICE")
+                    except ValueError:
+                        continue # Header columns missing
                         
-                        df_rows = df_tmp.iloc[1:]
-                        for _, row in df_rows.iterrows():
-                            # 2. Get Full Company Name
-                            full_name = str(row[idx_inst]).split('\n')[0].strip()
-                            
-                            # 3. AUTO-DISCOVERY: Convert Name to Ticker
-                            # We search Yahoo for the name. If found, we take the top result.
-                            # If not, we blindly use the first word (fallback).
-                            found_ticker = search_ticker(full_name)
-                            if found_ticker:
-                                ticker = list(found_ticker.values())[0] # Take first result
-                            else:
-                                ticker = full_name.split()[0].upper() # Fallback
-                            
-                            # 4. Clean Quantity (Handle '27:431' format)
-                            qty_str = str(row[idx_qty]).replace(':', '.').replace(',', '').strip()
-                            try:
-                                qty = float(qty_str)
-                            except: continue
-                            
-                            # 5. Clean Price (Handle GBX/GBP/USD)
-                            price_raw = str(row[idx_price]).upper()
-                            p_str = "".join(c for c in price_raw if c.isdigit() or c in '.-')
-                            try:
-                                price_val = float(p_str)
-                                if "GBX" in price_raw: price_val /= 100 # Convert Pence to Pounds
-                            except: price_val = 0.0
+                    # Process Data Rows (All rows after the header)
+                    df_rows = df_tmp.iloc[header_index+1:]
+                    
+                    for _, row in df_rows.iterrows():
+                        # Safety: Ensure row has enough columns
+                        if len(row) < max(idx_inst, idx_qty, idx_price): continue
 
-                            if qty > 0:
-                                extracted_data.append({
-                                    "Ticker": ticker, 
-                                    "Buy_Price_USD": price_val, 
-                                    "Shares": qty,
-                                    "Date": pd.Timestamp.now(),
-                                    "Status": "OPEN",
-                                    "Currency": "GBP" if any(x in price_raw for x in ["GBX", "GBP"]) else "USD"
-                                })
-                                
+                        # 1. Clean Name & Ticker
+                        raw_name = str(row[idx_inst]).replace('"', '').strip()
+                        full_name = raw_name.split('\n')[0].strip()
+                        
+                        # Stop if empty row
+                        if not full_name: continue
+                        
+                        # 2. Ticker Auto-Discovery
+                        found_ticker = search_ticker(full_name)
+                        if found_ticker:
+                            ticker = list(found_ticker.values())[0]
+                        else:
+                            # Fallback: Use first word (e.g., "Apple" from "Apple Inc")
+                            ticker = full_name.split()[0].upper() 
+                        
+                        # 3. Clean Quantity (Handle "27:431" and quotes)
+                        qty_str = str(row[idx_qty]).replace('"', '').replace(':', '.').replace(',', '').strip()
+                        try:
+                            qty = float(qty_str)
+                        except: continue
+                        
+                        # 4. Clean Price
+                        price_raw = str(row[idx_price]).replace('"', '').upper().strip()
+                        # Extract numbers only
+                        p_str = "".join(c for c in price_raw if c.isdigit() or c in '.-')
+                        try:
+                            price_val = float(p_str)
+                            if "GBX" in price_raw: price_val /= 100
+                        except: price_val = 0.0
+
+                        if qty > 0:
+                            extracted_data.append({
+                                "Ticker": ticker, 
+                                "Buy_Price_USD": price_val, 
+                                "Shares": qty,
+                                "Date": pd.Timestamp.now(),
+                                "Status": "OPEN",
+                                "Currency": "GBP" if "GBP" in price_raw or "GBX" in price_raw else "USD"
+                            })
+                            
+        if not extracted_data:
+            st.error("Debug: PDF was read, but no valid rows were extracted. The format might be tricky.")
+            return None
+            
         return pd.DataFrame(extracted_data)
+
     except Exception as e:
-        print(f"Extraction Error: {e}")
+        st.error(f"Critical PDF Error: {e}")
         return None
 
 def sync_portfolio_with_df(new_data_df):
@@ -565,6 +599,7 @@ def run_watchdog_scan(tele_token, tele_chat, threshold=0.7):
         return f"✅ Sent {alerts_sent} alerts to Telegram!"
     else:
         return "🐶 Watchdog scanned. No significant moves detected."
+
 
 
 
