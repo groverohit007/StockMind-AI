@@ -369,14 +369,38 @@ def remove_from_watchlist(ticker):
 def get_ai_analysis(ticker, api_key):
     if not api_key: return "⚠️ API Key Missing.", []
     if "sk-" not in api_key: return "⚠️ Invalid Key.", []
+    
     try:
-        headlines = [n['title'] for n in yf.Ticker(ticker).news[:3]]
-        if not headlines: return "No recent news.", []
+        # 1. Get News safely
+        stock = yf.Ticker(ticker)
+        news_list = stock.news
+        headlines = []
+        
+        # 2. Extract Titles (Bulletproof Method)
+        if news_list:
+            for n in news_list[:3]:
+                # Method A: Standard 'title' key
+                if 'title' in n:
+                    headlines.append(n['title'])
+                # Method B: Nested inside 'content' (New Yahoo Format)
+                elif 'content' in n and 'title' in n['content']:
+                    headlines.append(n['content']['title'])
+        
+        if not headlines: 
+            return f"ℹ️ No news headlines found for {ticker}.", []
+
+        # 3. Call AI
         client = OpenAI(api_key=api_key)
-        prompt = f"Analyze {ticker} headlines: {headlines}. Summary & Sentiment?"
-        res = client.chat.completions.create(model="gpt-3.5-turbo", messages=[{"role":"user","content":prompt}])
+        prompt = f"Analyze these headlines for {ticker}: {headlines}. Summary & Sentiment?"
+        
+        res = client.chat.completions.create(
+            model="gpt-3.5-turbo", 
+            messages=[{"role":"user","content":prompt}]
+        )
         return res.choices[0].message.content, headlines
-    except Exception as e: return f"AI Error: {e}", []
+
+    except Exception as e:
+        return f"AI Error: {str(e)}", []
 
 def send_telegram_alert(token, chat_id, msg):
     try:
@@ -426,3 +450,4 @@ def run_backtest(ticker, initial_capital=10000):
     processed['Equity'] = equity
     final = equity[-1]
     return processed, pd.DataFrame(trades), ((final-initial_capital)/initial_capital)*100
+
