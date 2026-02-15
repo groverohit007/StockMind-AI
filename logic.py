@@ -1,6 +1,8 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import pdfplumber
+import re
 import streamlit as st
 import requests
 import os
@@ -78,94 +80,120 @@ import pdfplumber # NEW: Add to requirements.txt
 
 def process_t212_pdf(file):
     extracted_data = []
-    debug_log = [] # To help us see what's happening
     
     try:
         with pdfplumber.open(file) as pdf:
-            for i, page in enumerate(pdf.pages):
-                tables = page.extract_tables()
+            for page in pdf.pages:
+                # STRATEGY 1: Extract Tables with "Text" layout (Best for whitespace tables)
+                tables = page.extract_tables({"vertical_strategy": "text", "horizontal_strategy": "text"})
                 
-                # DEBUG: Check if tables are found
+                # If Strategy 1 finds nothing, try default
                 if not tables:
-                    print(f"Page {i+1}: No tables found.")
-                    continue
-                
+                    tables = page.extract_tables()
+
                 for table in tables:
+                    if not table: continue
                     df_tmp = pd.DataFrame(table)
                     
-                    # --- DYNAMIC HEADER SEARCH ---
-                    # Instead of assuming row 0 is header, we search for the row containing "INSTRUMENT"
+                    # Search for the Header Row
                     header_index = -1
                     for idx, row in df_tmp.iterrows():
-                        # Convert entire row to string, clean quotes and spaces, check for keyword
                         row_str = " ".join([str(x).upper() for x in row])
-                        if "INSTRUMENT" in row_str and "QUANTITY" in row_str:
+                        if "INSTRUMENT" in row_str: # Relaxed check
                             header_index = idx
                             break
                     
-                    if header_index == -1:
-                        continue # Skip tables that aren't the portfolio list
+                    if header_index != -1:
+                        # Found a table! Process it.
+                        # Clean headers: Remove newlines, quotes, spaces
+                        headers = [str(c).replace('\n', '').replace('"', '').strip().upper() for c in df_tmp.iloc[header_index]]
                         
-                    # Set the found row as header
-                    headers = [str(c).replace('\n', '').replace('"', '').strip().upper() for c in df_tmp.iloc[header_index]]
-                    
-                    # Map Columns
-                    try:
-                        idx_inst = headers.index("INSTRUMENT")
-                        idx_qty = headers.index("QUANTITY")
-                        idx_price = headers.index("PRICE")
-                    except ValueError:
-                        continue # Header columns missing
-                        
-                    # Process Data Rows (All rows after the header)
-                    df_rows = df_tmp.iloc[header_index+1:]
-                    
-                    for _, row in df_rows.iterrows():
-                        # Safety: Ensure row has enough columns
-                        if len(row) < max(idx_inst, idx_qty, idx_price): continue
-
-                        # 1. Clean Name & Ticker
-                        raw_name = str(row[idx_inst]).replace('"', '').strip()
-                        full_name = raw_name.split('\n')[0].strip()
-                        
-                        # Stop if empty row
-                        if not full_name: continue
-                        
-                        # 2. Ticker Auto-Discovery
-                        found_ticker = search_ticker(full_name)
-                        if found_ticker:
-                            ticker = list(found_ticker.values())[0]
-                        else:
-                            # Fallback: Use first word (e.g., "Apple" from "Apple Inc")
-                            ticker = full_name.split()[0].upper() 
-                        
-                        # 3. Clean Quantity (Handle "27:431" and quotes)
-                        qty_str = str(row[idx_qty]).replace('"', '').replace(':', '.').replace(',', '').strip()
                         try:
-                            qty = float(qty_str)
-                        except: continue
-                        
-                        # 4. Clean Price
-                        price_raw = str(row[idx_price]).replace('"', '').upper().strip()
-                        # Extract numbers only
-                        p_str = "".join(c for c in price_raw if c.isdigit() or c in '.-')
-                        try:
-                            price_val = float(p_str)
-                            if "GBX" in price_raw: price_val /= 100
-                        except: price_val = 0.0
+                            # Map columns dynamically
+                            idx_inst = headers.index("INSTRUMENT")
+                            # Look for Quantity (might be 'QTY' or 'QUANTITY')
+                            idx_qty = next(i for i, h in enumerate(headers) if "QUANTITY" in h or "QTY" in h)
+                            # Look for Price
+                            idx_price = next(i for i, h in enumerate(headers) if "PRICE" in h)
+                        except: continue # Skip if headers missing
 
-                        if qty > 0:
-                            extracted_data.append({
-                                "Ticker": ticker, 
-                                "Buy_Price_USD": price_val, 
-                                "Shares": qty,
-                                "Date": pd.Timestamp.now(),
-                                "Status": "OPEN",
-                                "Currency": "GBP" if "GBP" in price_raw or "GBX" in price_raw else "USD"
-                            })
+                        # Process Data Rows
+                        for _, row in df_tmp.iloc[header_index+1:].iterrows():
+                            # clean_cell helper to remove " and \n
+                            def clean_cell(val):
+                                return str(val).replace('"', '').replace('\n', '').strip()
+
+                            full_name = clean_cell(row[idx_inst])
+                            if not full_name or full_name == "None": continue
+
+                            # Ticker Lookup
+                            found_ticker = search_ticker(full_name)
+                            ticker = list(found_ticker.values())[0] if found_ticker else full_name.split()[0].upper()
+
+                            # Quantity (Handle 27:431 format)
+                            qty_str = clean_cell(row[idx_qty]).replace(':', '.').replace(',', '')
+                            try:
+                                qty = float(qty_str)
+                            except: continue
+
+                            # Price (Handle 'USD 255.3' or 'GBX 123')
+                            price_raw = clean_cell(row[idx_price]).upper()
+                            p_str = "".join(c for c in price_raw if c.isdigit() or c in '.-')
+                            try:
+                                price_val = float(p_str)
+                                if "GBX" in price_raw: price_val /= 100
+                            except: price_val = 0.0
+
+                            if qty > 0:
+                                extracted_data.append({
+                                    "Ticker": ticker,
+                                    "Buy_Price_USD": price_val,
+                                    "Shares": qty,
+                                    "Date": pd.Timestamp.now(),
+                                    "Status": "OPEN",
+                                    "Currency": "GBP" if "GBP" in price_raw or "GBX" in price_raw else "USD"
+                                })
+                                continue # Successfully added row, move to next
+
+                # STRATEGY 2: Fallback Raw Text Parsing (If tables failed)
+                # Your PDF text is very structured (CSV-like), so we can Regex it.
+                if not extracted_data:
+                    text = page.extract_text()
+                    lines = text.split('\n')
+                    for line in lines:
+                        # Regex to find: "Name","ISIN","Qty","Price"
+                        # Pattern looks for 3 or 4 quoted groups
+                        # Example: "Apple Inc","US03...","8.16","USD 255"
+                        match = re.search(r'"(.+?)","(.*?)"?,"([\d:.,]+?)","([A-Z]{3}\s?[\d.]+?)"', line)
+                        
+                        if match:
+                            full_name = match.group(1).replace('\n', '').strip()
+                            # Group 2 is ISIN (skip)
+                            qty_str = match.group(3).replace(':', '.').replace(',', '')
+                            price_raw = match.group(4)
                             
+                            # (Reuse Ticker/Qty/Price logic)
+                            found_ticker = search_ticker(full_name)
+                            ticker = list(found_ticker.values())[0] if found_ticker else full_name.split()[0].upper()
+                            
+                            try: qty = float(qty_str)
+                            except: qty = 0
+                            
+                            p_str = "".join(c for c in price_raw if c.isdigit() or c in '.-')
+                            try:
+                                price_val = float(p_str)
+                                if "GBX" in price_raw.upper(): price_val /= 100
+                            except: price_val = 0.0
+                            
+                            if qty > 0:
+                                extracted_data.append({
+                                    "Ticker": ticker, "Buy_Price_USD": price_val, "Shares": qty,
+                                    "Date": pd.Timestamp.now(), "Status": "OPEN",
+                                    "Currency": "GBP" if "GBP" in price_raw.upper() or "GBX" in price_raw.upper() else "USD"
+                                })
+
         if not extracted_data:
-            st.error("Debug: PDF was read, but no valid rows were extracted. The format might be tricky.")
+            st.error("Debug: scanned PDF but found no assets. The format might be encrypted or image-based.")
             return None
             
         return pd.DataFrame(extracted_data)
@@ -599,6 +627,7 @@ def run_watchdog_scan(tele_token, tele_chat, threshold=0.7):
         return f"✅ Sent {alerts_sent} alerts to Telegram!"
     else:
         return "🐶 Watchdog scanned. No significant moves detected."
+
 
 
 
