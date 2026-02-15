@@ -77,60 +77,55 @@ def add_technical_overlays(df):
 import pdfplumber # NEW: Add to requirements.txt
 
 def process_t212_pdf(file):
-    """
-    Specifically tuned for Trading 212 'Confirmation of Holdings' PDF.
-    Extracts Instrument, Quantity, and Price across multiple pages.
-    """
     extracted_data = []
     try:
         with pdfplumber.open(file) as pdf:
             for page in pdf.pages:
                 tables = page.extract_tables()
                 for table in tables:
-                    df_tmp = pd.DataFrame(table)
+                    if not table or len(table) < 2: continue
                     
-                    # Identify the correct table by checking headers in the first row
-                    if df_tmp.shape[1] >= 4 and any(x in str(df_tmp.iloc[0,0]).upper() for x in ["INSTRUMENT", "ASSET", "HOLDING"]):
-                        # Set headers and remove header row
-                        df_tmp.columns = ["Instrument", "ISIN", "Quantity", "Price"]
-                        df_tmp = df_tmp.iloc[1:].reset_index(drop=True)
+                    df_tmp = pd.DataFrame(table)
+                    # Normalize headers to handle newlines and extra spaces
+                    headers = [str(c).strip().upper() for c in df_tmp.iloc[0]]
+                    
+                    if "INSTRUMENT" in headers:
+                        # Map column indices based on normalized headers
+                        idx_inst = headers.index("INSTRUMENT")
+                        idx_qty = headers.index("QUANTITY")
+                        idx_price = headers.index("PRICE")
                         
-                        for _, row in df_tmp.iterrows():
-                            # Clean Instrument name to get Ticker (e.g., Apple Inc -> AAPL)
-                            # Note: The PDF lacks () for tickers, so we use the first word or lookup
-                            instr_name = str(row['Instrument']).split()[0].upper()
+                        df_rows = df_tmp.iloc[1:]
+                        for _, row in df_rows.iterrows():
+                            # Clean Instrument name and try to map to ticker
+                            # Note: Trading 212 PDFs usually require a lookup table for full names
+                            instr_name = str(row[idx_inst]).split('\n')[0].strip()
                             
-                            # Clean Quantity (Handling cases like '27:431' or standard floats)
-                            qty_str = str(row['Quantity']).replace(':', '.').replace(',', '').strip()
+                            # Clean Quantity (Fixes the 27:431 format)
+                            qty_str = str(row[idx_qty]).replace(':', '.').replace(',', '').strip()
                             try:
                                 qty = float(qty_str)
                             except:
-                                qty = 0.0
+                                continue
                             
-                            # Clean Price (Handling 'USD 255.3' or 'GBX 1271')
-                            price_raw = str(row['Price']).upper()
-                            price_val = 0.0
-                            
-                            # If it's GBX (pence), convert to GBP by dividing by 100
-                            if "GBX" in price_raw:
-                                p_str = price_raw.replace("GBX", "").replace(",", "").strip()
-                                price_val = float(p_str) / 100 if p_str else 0.0
-                            else:
-                                # Standard USD/GBP/EUR
-                                p_str = price_raw.replace("USD", "").replace("GBP", "").replace("EUR", "").replace(",", "").strip()
-                                try:
-                                    price_val = float(p_str)
-                                except:
-                                    price_val = 0.0
+                            # Clean Price and Currency
+                            price_raw = str(row[idx_price]).upper()
+                            p_str = "".join(c for c in price_raw if c.isdigit() or c in '.-')
+                            try:
+                                price_val = float(p_str)
+                                if "GBX" in price_raw:
+                                    price_val = price_val / 100
+                            except:
+                                price_val = 0.0
 
-                            if instr_name and qty > 0:
+                            if qty > 0:
                                 extracted_data.append({
-                                    "Ticker": instr_name, # Fallback to first word as ticker
+                                    "Ticker": instr_name, 
                                     "Buy_Price_USD": price_val, 
                                     "Shares": qty,
                                     "Date": pd.Timestamp.now(),
                                     "Status": "OPEN",
-                                    "Currency": "GBP" if "GBX" in price_raw or "GBP" in price_raw else "USD"
+                                    "Currency": "GBP" if any(x in price_raw for x in ["GBX", "GBP"]) else "USD"
                                 })
                                 
         return pd.DataFrame(extracted_data)
@@ -520,6 +515,7 @@ def run_backtest(ticker, initial_capital=10000):
     processed['Equity'] = equity
     final = equity[-1]
     return processed, pd.DataFrame(trades), ((final-initial_capital)/initial_capital)*100
+
 
 
 
