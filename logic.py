@@ -74,7 +74,53 @@ def add_technical_overlays(df):
     df['MACD_Signal'] = indicator_macd.macd_signal()
     
     return df
+import pdfplumber # NEW: Add to requirements.txt
 
+def process_t212_pdf(file):
+    """
+    Parses a Trading 212 Statement PDF and extracts stock data.
+    Expected Columns: Instrument, ISIN, Quantity, Average price
+    """
+    extracted_data = []
+    try:
+        with pdfplumber.open(file) as pdf:
+            for page in pdf.pages:
+                table = page.extract_table()
+                if table:
+                    df_pdf = pd.DataFrame(table[1:], columns=table[0])
+                    # Trading 212 Column cleaning
+                    for _, row in df_pdf.iterrows():
+                        ticker_raw = str(row.get('Instrument', ''))
+                        # Extract ticker from "Company Name (TICKER)" format
+                        if '(' in ticker_raw:
+                            ticker = ticker_raw.split('(')[-1].split(')')[0]
+                        else:
+                            ticker = ticker_raw
+                            
+                        quantity = float(str(row.get('Quantity', 0)).replace(',', ''))
+                        price = float(str(row.get('Average price', 0)).replace('$', '').replace(',', ''))
+                        
+                        if ticker and quantity > 0:
+                            extracted_data.append({
+                                "Ticker": ticker.strip().upper(),
+                                "Buy_Price_GBP": price,
+                                "Shares": quantity,
+                                "Date": pd.Timestamp.now(),
+                                "Status": "OPEN",
+                                "Currency": "GBP"
+                            })
+        return pd.DataFrame(extracted_data)
+    except Exception as e:
+        print(f"PDF Error: {e}")
+        return None
+
+def sync_portfolio_with_df(new_data_df):
+    """Overwrites or appends the portfolio with uploaded data."""
+    if new_data_df is not None and not new_data_df.empty:
+        new_data_df.to_csv(PORTFOLIO_FILE, index=False)
+        return True
+    return False
+    
 # --- 2. FUNDAMENTAL HEALTH CHECK ---
 def get_fundamentals(ticker):
     """Fetches key financial ratios."""
@@ -450,4 +496,5 @@ def run_backtest(ticker, initial_capital=10000):
     processed['Equity'] = equity
     final = equity[-1]
     return processed, pd.DataFrame(trades), ((final-initial_capital)/initial_capital)*100
+
 
