@@ -86,29 +86,36 @@ def process_t212_pdf(file):
                     if not table or len(table) < 2: continue
                     
                     df_tmp = pd.DataFrame(table)
-                    # Normalize headers to handle newlines and extra spaces
-                    headers = [str(c).strip().upper() for c in df_tmp.iloc[0]]
+                    # Normalize headers to handle newlines (found in source [8, 17, 27])
+                    headers = [str(c).strip().replace('\n', '').upper() for c in df_tmp.iloc[0]]
                     
                     if "INSTRUMENT" in headers:
-                        # Map column indices based on normalized headers
                         idx_inst = headers.index("INSTRUMENT")
                         idx_qty = headers.index("QUANTITY")
                         idx_price = headers.index("PRICE")
                         
                         df_rows = df_tmp.iloc[1:]
                         for _, row in df_rows.iterrows():
-                            # Clean Instrument name and try to map to ticker
-                            # Note: Trading 212 PDFs usually require a lookup table for full names
-                            instr_name = str(row[idx_inst]).split('\n')[0].strip()
+                            # Extract full name from the PDF cell 
+                            full_name = str(row[idx_inst]).split('\n')[0].strip()
                             
-                            # Clean Quantity (Fixes the 27:431 format)
+                            # Perform Ticker Lookup
+                            ticker_results = search_ticker(full_name)
+                            if ticker_results:
+                                # Grab the first/best ticker symbol from search
+                                ticker = list(ticker_results.values())[0]
+                            else:
+                                # Fallback to first word if search fails
+                                ticker = full_name.split()[0].upper()
+                            
+                            # Clean Quantity: Handle "27:431" format
                             qty_str = str(row[idx_qty]).replace(':', '.').replace(',', '').strip()
                             try:
                                 qty = float(qty_str)
                             except:
                                 continue
                             
-                            # Clean Price and Currency
+                            # Clean Price & Handle GBX (Pence) to GBP conversion
                             price_raw = str(row[idx_price]).upper()
                             p_str = "".join(c for c in price_raw if c.isdigit() or c in '.-')
                             try:
@@ -120,7 +127,7 @@ def process_t212_pdf(file):
 
                             if qty > 0:
                                 extracted_data.append({
-                                    "Ticker": instr_name, 
+                                    "Ticker": ticker, 
                                     "Buy_Price_USD": price_val, 
                                     "Shares": qty,
                                     "Date": pd.Timestamp.now(),
@@ -515,6 +522,7 @@ def run_backtest(ticker, initial_capital=10000):
     processed['Equity'] = equity
     final = equity[-1]
     return processed, pd.DataFrame(trades), ((final-initial_capital)/initial_capital)*100
+
 
 
 
