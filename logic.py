@@ -78,105 +78,142 @@ def add_technical_overlays(df):
     
     return df
 
-# --- IMPROVED PDF PARSER (TOKEN STREAM METHOD) ---
 def process_t212_pdf(file):
     extracted_data = []
     
     try:
-        full_text = ""
-        # 1. Extract ALL text from the PDF first
         with pdfplumber.open(file) as pdf:
             for page in pdf.pages:
-                text = page.extract_text()
-                if text:
-                    full_text += text + "\n"
-
-        # 2. Token Stream Strategy
-        # We look for strings explicitly wrapped in quotes: "Value"
-        # The T212 format is strictly: "Name", "ISIN", "Qty", "Price"
-        # We capture everything inside quotes.
-        tokens = re.findall(r'"([^"]*)"', full_text)
-        
-        # We iterate through tokens and look for ISINs to anchor our position
-        i = 0
-        while i < len(tokens):
-            token = tokens[i].strip()
-            
-            # Check if this token looks like an ISIN (12 chars, starts with 2 letters, ends with digit)
-            # Regex: 2 letters, 9 alphanum, 1 digit check
-            if re.match(r'^[A-Z]{2}[A-Z0-9]{9}\d?$', token) and len(token) == 12:
-                # We found an ISIN at index `i`.
-                # The pattern implies:
-                # i-1: Name
-                # i:   ISIN
-                # i+1: Quantity
-                # i+2: Price
+                # STRATEGY 1: Extract Tables with "Text" layout (Best for whitespace tables)
+                tables = page.extract_tables({"vertical_strategy": "text", "horizontal_strategy": "text"})
                 
-                if i > 0 and i + 2 < len(tokens):
-                    raw_name = tokens[i-1].replace('\n', ' ').strip()
-                    isin_code = token
-                    raw_qty = tokens[i+1].strip()
-                    raw_price = tokens[i+2].strip()
-                    
-                    # --- Data Cleaning ---
-                    if "ISIN" in isin_code or "INSTRUMENT" in raw_name:
-                        i += 1
-                        continue # Skip headers
+                # If Strategy 1 finds nothing, try default
+                if not tables:
+                    tables = page.extract_tables()
 
-                    # Quantity Fix (e.g. "27:43" -> 27.43)
-                    qty_str = raw_qty.replace(':', '.').replace(',', '')
-                    try:
-                        qty = float(qty_str)
-                    except:
-                        i += 1
-                        continue 
+                for table in tables:
+                    if not table: continue
+                    df_tmp = pd.DataFrame(table)
+                    
+                    # Search for the Header Row
+                    header_index = -1
+                    for idx, row in df_tmp.iterrows():
+                        row_str = " ".join([str(x).upper() for x in row])
+                        # Look for both INSTRUMENT and ISIN to be sure
+                        if "INSTRUMENT" in row_str and "ISIN" in row_str:
+                            header_index = idx
+                            break
+                    
+                    if header_index != -1:
+                        # Found a table! Process it.
+                        headers = [str(c).replace('\n', '').replace('"', '').strip().upper() for c in df_tmp.iloc[header_index]]
+                        
+                        try:
+                            # Map columns dynamically
+                            idx_inst = headers.index("INSTRUMENT")
+                            # Find ISIN column
+                            idx_isin = next(i for i, h in enumerate(headers) if "ISIN" in h)
+                            # Look for Quantity 
+                            idx_qty = next(i for i, h in enumerate(headers) if "QUANTITY" in h or "QTY" in h)
+                            # Look for Price
+                            idx_price = next(i for i, h in enumerate(headers) if "PRICE" in h)
+                        except: continue # Skip if headers missing
 
-                    # Price Cleaning (e.g. "USD 255.3")
-                    # Extract Currency and Value
-                    currency = "USD" # Default
-                    price_val = 0.0
-                    
-                    # Regex to separate "USD" from "100.50"
-                    p_match = re.search(r'([A-Z]{3})\s?([\d.]+)', raw_price)
-                    if p_match:
-                        currency = p_match.group(1)
-                        price_val = float(p_match.group(2))
-                    
-                    # Convert GBX (Pence) to GBP
-                    if currency == "GBX":
-                        price_val /= 100
-                        currency = "GBP"
+                        # Process Data Rows
+                        for _, row in df_tmp.iloc[header_index+1:].iterrows():
+                            # Helper to clean cell values
+                            def clean_cell(val):
+                                return str(val).replace('"', '').replace('\n', '').strip()
 
-                    # --- Ticker Resolution ---
-                    ticker = None
-                    
-                    # 1. Search by ISIN (Most reliable)
-                    res = search_ticker(isin_code)
-                    if res: 
-                        ticker = list(res.values())[0]
-                    
-                    # 2. Fallback to Name
-                    if not ticker:
-                        res = search_ticker(raw_name)
-                        if res: 
-                            ticker = list(res.values())[0]
-                        else:
-                            # 3. Simple Fallback (First word)
-                            ticker = raw_name.split()[0].upper()
+                            full_name = clean_cell(row[idx_inst])
+                            isin_code = clean_cell(row[idx_isin]) # Extract ISIN
 
-                    if qty > 0 and ticker:
-                        extracted_data.append({
-                            "Ticker": ticker,
-                            "Name": raw_name,
-                            "Shares": qty,
-                            "Buy_Price_USD": price_val, # Approx value column
-                            "Date": pd.Timestamp.now(),
-                            "Status": "OPEN",
-                            "Currency": currency,
-                            "ISIN": isin_code
-                        })
-            
-            i += 1 # Advance to next token
+                            if not full_name or full_name == "None": continue
+
+                            # --- NEW: ISIN PRIORITY LOOKUP ---
+                            ticker = None
+                            
+                            # 1. Try searching by ISIN first (Most Accurate)
+                            if isin_code and len(isin_code) > 5:
+                                isin_results = search_ticker(isin_code)
+                                if isin_results:
+                                    # Take the first result (Best Match)
+                                    ticker = list(isin_results.values())[0]
+                            
+                            # 2. If ISIN fails, try searching by Name
+                            if not ticker:
+                                name_results = search_ticker(full_name)
+                                if name_results:
+                                    ticker = list(name_results.values())[0]
+                                else:
+                                    # 3. Fallback: Use first word of name
+                                    ticker = full_name.split()[0].upper()
+
+                            # Quantity Cleaning
+                            qty_str = clean_cell(row[idx_qty]).replace(':', '.').replace(',', '')
+                            try:
+                                qty = float(qty_str)
+                            except: continue
+
+                            # Price Cleaning
+                            price_raw = clean_cell(row[idx_price]).upper()
+                            p_str = "".join(c for c in price_raw if c.isdigit() or c in '.-')
+                            try:
+                                price_val = float(p_str)
+                                if "GBX" in price_raw: price_val /= 100
+                            except: price_val = 0.0
+
+                            if qty > 0 and ticker:
+                                extracted_data.append({
+                                    "Ticker": ticker,
+                                    "Buy_Price_USD": price_val,
+                                    "Shares": qty,
+                                    "Date": pd.Timestamp.now(),
+                                    "Status": "OPEN",
+                                    "Currency": "GBP" if "GBP" in price_raw or "GBX" in price_raw else "USD"
+                                })
+                                continue 
+
+                # STRATEGY 2: Fallback Regex Parsing (Updated for ISIN)
+                if not extracted_data:
+                    text = page.extract_text()
+                    lines = text.split('\n')
+                    for line in lines:
+                        # Regex to find: "Name","ISIN","Qty","Price"
+                        # Matches: "Apple Inc","US0378331005","8.16","USD 255"
+                        match = re.search(r'"(.+?)","([A-Z0-9]{9,12})","([\d:.,]+?)","([A-Z]{3}\s?[\d.]+?)"', line)
+                        
+                        if match:
+                            full_name = match.group(1).replace('\n', '').strip()
+                            isin_code = match.group(2).strip()
+                            qty_str = match.group(3).replace(':', '.').replace(',', '')
+                            price_raw = match.group(4)
+                            
+                            # Logic Reuse: ISIN -> Name -> Fallback
+                            ticker = None
+                            if isin_code:
+                                res = search_ticker(isin_code)
+                                if res: ticker = list(res.values())[0]
+                            
+                            if not ticker:
+                                res = search_ticker(full_name)
+                                ticker = list(res.values())[0] if res else full_name.split()[0].upper()
+                            
+                            try: qty = float(qty_str)
+                            except: qty = 0
+                            
+                            p_str = "".join(c for c in price_raw if c.isdigit() or c in '.-')
+                            try:
+                                price_val = float(p_str)
+                                if "GBX" in price_raw.upper(): price_val /= 100
+                            except: price_val = 0.0
+                            
+                            if qty > 0:
+                                extracted_data.append({
+                                    "Ticker": ticker, "Buy_Price_USD": price_val, "Shares": qty,
+                                    "Date": pd.Timestamp.now(), "Status": "OPEN",
+                                    "Currency": "GBP" if "GBP" in price_raw.upper() or "GBX" in price_raw.upper() else "USD"
+                                })
 
         if not extracted_data:
             print("Debug: No assets found in PDF.")
@@ -483,7 +520,7 @@ def get_exchange_rate(base_currency="GBP"):
 
 def get_portfolio():
     if os.path.exists(PORTFOLIO_FILE): return pd.read_csv(PORTFOLIO_FILE)
-    return pd.DataFrame(columns=["Ticker", "Buy_Price_USD", "Shares", "Date", "Status", "Currency", "Account"])
+    return pd.DataFrame(columns=["Ticker", "Buy_Price_USD", "Shares", "Date", "Status", "Currency"])
 
 def execute_trade(ticker, price_usd, shares, action, currency="USD"):
     df = get_portfolio()
