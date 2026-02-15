@@ -7,7 +7,7 @@ import time
 import streamlit as st
 import requests
 import os
-from scipy.optimize import minimize # NEW IMPORT FOR OPTIMIZER
+from scipy.optimize import minimize 
 from ta.momentum import RSIIndicator
 from ta.trend import SMAIndicator, MACD
 from ta.volatility import AverageTrueRange, BollingerBands
@@ -77,7 +77,6 @@ def add_technical_overlays(df):
     df['MACD_Signal'] = indicator_macd.macd_signal()
     
     return df
-import pdfplumber # NEW: Add to requirements.txt
 
 def process_t212_pdf(file):
     extracted_data = []
@@ -437,43 +436,74 @@ def calculate_portfolio_var(portfolio_df, confidence_level=0.95):
     except:
         return 0.0
 
-# NEW: PORTFOLIO OPTIMIZER (MARKOWITZ)
+# --- FIX START: ROBUST PORTFOLIO OPTIMIZER ---
 def optimize_portfolio(tickers):
     """
     Calculates the best allocation weights (Sharpe Ratio) for a list of tickers.
+    Fixes: shape mismatches when tickers fail to download.
     """
-    if len(tickers) < 2: return None
+    # 1. Filter out empty tickers
+    tickers = [t for t in tickers if t]
+    if len(tickers) < 2: 
+        return None
     
-    # 1. Get Data
+    # 2. Get Data
     data = pd.DataFrame()
     for t in tickers:
         df = get_data(t, period="1y")
         if df is not None:
             data[t] = df['Close']
             
-    if data.empty: return None
+    # 3. Clean Data - Drop columns with all NaNs or insufficient data
+    # This prevents the shape mismatch error
+    data = data.dropna(axis=1, how='all')
     
-    # 2. Calculate Returns & Covariance
+    if data.empty or data.shape[1] < 2: 
+        return None
+    
+    # 4. Calculate Returns
     returns = data.pct_change().dropna()
+    if returns.empty: 
+        return None
+
+    # 5. ALIGN TICKERS with actual data
+    valid_tickers = returns.columns.tolist()
+    num_assets = len(valid_tickers)
+    
+    if num_assets < 2:
+        return None
+
     mean_returns = returns.mean() * 252 # Annualized
     cov_matrix = returns.cov() * 252
     
-    # 3. Define Optimization Function (Negative Sharpe Ratio)
+    # 6. Define Optimization Function
     def negative_sharpe(weights):
         p_ret = np.sum(weights * mean_returns)
         p_vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
-        # Assuming risk-free rate ~0 for simplicity
+        if p_vol == 0: return 0
         return -p_ret / p_vol
     
-    # 4. Constraints (Weights sum to 1)
+    # 7. Constraints (Weights sum to 1)
     constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
-    bounds = tuple((0, 1) for _ in range(len(tickers)))
-    init_guess = [1/len(tickers)] * len(tickers)
     
-    # 5. Run Optimization
-    result = minimize(negative_sharpe, init_guess, method='SLSQP', bounds=bounds, constraints=constraints)
+    # 8. Bounds and Init Guess using CORRECT num_assets
+    bounds = tuple((0.0, 1.0) for _ in range(num_assets))
+    init_guess = [1.0 / num_assets] * num_assets
     
-    return dict(zip(tickers, result.x))
+    # 9. Run Optimization
+    try:
+        result = minimize(
+            negative_sharpe, 
+            init_guess, 
+            method='SLSQP', 
+            bounds=bounds, 
+            constraints=constraints
+        )
+        return dict(zip(valid_tickers, result.x))
+    except Exception as e:
+        print(f"Optimization failed: {e}")
+        return None
+# --- FIX END ---
 
 # --- 6. PORTFOLIO & ALERTS ---
 PORTFOLIO_FILE = "portfolio.csv"
@@ -651,12 +681,3 @@ def run_watchdog_scan(tele_token, tele_chat, threshold=0.7):
         return f"✅ Sent {alerts_sent} alerts to Telegram!"
     else:
         return "🐶 Watchdog scanned. No significant moves detected."
-
-
-
-
-
-
-
-
-
