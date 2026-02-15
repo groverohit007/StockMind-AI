@@ -90,7 +90,7 @@ def process_t212_pdf(file):
                     df_tmp = pd.DataFrame(table)
                     
                     # Identify the correct table by checking headers in the first row
-                    if df_tmp.shape[1] >= 4 and "INSTRUMENT" in str(df_tmp.iloc[0,0]).upper():
+                    if df_tmp.shape[1] >= 4 and any(x in str(df_tmp.iloc[0,0]).upper() for x in ["INSTRUMENT", "ASSET", "HOLDING"]):
                         # Set headers and remove header row
                         df_tmp.columns = ["Instrument", "ISIN", "Quantity", "Price"]
                         df_tmp = df_tmp.iloc[1:].reset_index(drop=True)
@@ -520,5 +520,6 @@ def run_backtest(ticker, initial_capital=10000):
     processed['Equity'] = equity
     final = equity[-1]
     return processed, pd.DataFrame(trades), ((final-initial_capital)/initial_capital)*100
+
 
 
