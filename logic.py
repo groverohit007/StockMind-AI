@@ -5,6 +5,7 @@ import streamlit as st
 import requests
 import os
 import pdfplumber
+import io
 import re
 from scipy.optimize import minimize
 from ta.momentum import RSIIndicator
@@ -54,47 +55,59 @@ def add_technical_overlays(df):
     df['MACD'], df['MACD_Signal'] = macd.macd(), macd.macd_signal()
     return df
 
-# --- 2. TRADING 212 PDF PARSER (ROBUST) ---
-def process_t212_pdf(file):
+# --- 2. TRADING 212 PDF PARSER (ROBUST VERSION) ---
+def process_t212_pdf(uploaded_file):
     """
-    Robust parser for Trading 212 'Confirmation of Holdings' PDFs.
+    Robust parser that handles different T212 layouts, currency conversion (GBX->GBP),
+    and ticker mapping.
     """
     def _norm(s): return re.sub(r"\s+", " ", str(s or "")).strip()
+    
     def _to_float(num_str):
         s = _norm(num_str).replace(":", ".").replace(",", "")
         s = re.sub(r"[^0-9\.\-]", "", s)
         try: return float(s)
         except: return None
+        
     def _infer_ticker(instrument):
         name = _norm(instrument).upper()
-        # Look for (TICKER) pattern, otherwise use first word
+        # Look for (TICKER) pattern inside parentheses
         m = re.search(r"\(([A-Z0-9\.\-]{1,15})\)", name)
-        return m.group(1) if m else name.split()[0]
+        if m: return m.group(1)
+        # Common T212 Name Mappings
+        map_db = {
+            "APPLE INC": "AAPL", "MICROSOFT CORP": "MSFT", "NVIDIA CORP": "NVDA",
+            "TESLA INC": "TSLA", "AMAZON.COM INC": "AMZN", "ALPHABET INC": "GOOGL",
+            "ROLLS-ROYCE HOLDINGS PLC": "RR.L", "XPENG INC": "XPEV", "NIO INC": "NIO",
+            "PALANTIR TECHNOLOGIES INC": "PLTR", "GAMESTOP CORP": "GME", "AMC ENTERTAINMENT": "AMC"
+        }
+        for k, v in map_db.items():
+            if k in name: return v
+        return name.split()[0] # Fallback to first word
 
     extracted = []
     try:
-        # Reset file pointer just in case
-        file.seek(0)
-        with pdfplumber.open(file) as pdf:
+        # Reset file pointer to ensure we read from start
+        uploaded_file.seek(0)
+        with pdfplumber.open(uploaded_file) as pdf:
             for page in pdf.pages:
                 tables = page.extract_tables() or []
                 for table in tables:
                     if not table or len(table) < 2: continue
                     
-                    # Find header row
+                    # Find header row dynamically
                     header_idx = None
                     for i, row in enumerate(table[:10]):
                         joined = " | ".join(_norm(x).upper() for x in row)
-                        if "INSTRUMENT" in joined and "QUANTITY" in joined:
+                        if "INSTRUMENT" in joined and ("QUANTITY" in joined or "QTY" in joined):
                             header_idx = i
                             break
                     if header_idx is None: continue
 
                     header = [_norm(x).upper() for x in table[header_idx]]
                     try:
-                        # Find relevant column indices
-                        c_inst = [i for i, h in enumerate(header) if "INSTRUMENT" in h][0]
-                        c_qty = [i for i, h in enumerate(header) if "QUANTITY" in h][0]
+                        c_inst = [i for i, h in enumerate(header) if "INSTRUMENT" in h or "NAME" in h][0]
+                        c_qty = [i for i, h in enumerate(header) if "QUANTITY" in h or "QTY" in h][0]
                         # Price might be "PRICE", "AVG PRICE", etc.
                         c_price = [i for i, h in enumerate(header) if "PRICE" in h][0]
                     except: continue
@@ -106,7 +119,7 @@ def process_t212_pdf(file):
                         if not inst or inst.upper() == "TOTAL": continue
                         
                         qty = _to_float(row[c_qty])
-                        if not qty: continue
+                        if not qty or qty <= 0: continue
                         
                         price_txt = _norm(row[c_price]).upper()
                         price_val = _to_float(price_txt)
@@ -114,7 +127,7 @@ def process_t212_pdf(file):
                         currency = "USD"
                         if "GBX" in price_txt: 
                             currency = "GBP"
-                            if price_val: price_val /= 100
+                            if price_val: price_val /= 100 # Convert pence to pounds
                         elif "GBP" in price_txt: currency = "GBP"
                         elif "EUR" in price_txt: currency = "EUR"
                         
@@ -168,7 +181,7 @@ def get_exchange_rate(base_currency="GBP"):
         return 1.0 / d['Close'].iloc[-1] if not d.empty else 0.78
     except: return 0.78
 
-# --- 4. ROBUST AI (RESTORED) ---
+# --- 4. ROBUST AI (NOISE FILTERING + MEMORY) ---
 def train_consensus_model(data):
     df = data.copy()
     if 'Volume' in df.columns: df['Volume'] = df['Volume'].fillna(0)
@@ -201,6 +214,7 @@ def train_consensus_model(data):
     lr = LogisticRegression(solver='liblinear').fit(train[features], train['Target'])
     
     test = test.copy()
+    # Average probability
     test['Confidence'] = (rf.predict_proba(test[features])[:,1] + gb.predict_proba(test[features])[:,1] + lr.predict_proba(test[features])[:,1]) / 3
     
     last_row = test.iloc[[-1]]
@@ -211,11 +225,9 @@ def train_consensus_model(data):
     }
     return test, features, votes
 
-# --- 5. MISSING FUNCTIONS RESTORED ---
+# --- 5. RESTORED FUNCTIONS (Forecast, Optimizer, VaR, Alerts, Backtest) ---
 def predict_long_term_trends(data):
-    """
-    Predicts 1W, 1M, 3M, 6M trends.
-    """
+    """Predicts 1W, 1M, 3M, 6M trends."""
     df = data.copy()
     horizons = {"1 Week": 5, "1 Month": 20, "3 Months": 60, "6 Months": 120}
     preds = {}
@@ -250,8 +262,10 @@ def optimize_portfolio(tickers):
     bounds = tuple((0, 1) for _ in range(len(tickers)))
     init = [1/len(tickers)] * len(tickers)
     
-    res = minimize(neg_sharpe, init, method='SLSQP', bounds=bounds, constraints=cons)
-    return dict(zip(tickers, res.x))
+    try:
+        res = minimize(neg_sharpe, init, method='SLSQP', bounds=bounds, constraints=cons)
+        return dict(zip(tickers, res.x))
+    except: return None
 
 def calculate_portfolio_var(portfolio_df, confidence=0.95):
     try:
@@ -264,12 +278,15 @@ def calculate_portfolio_var(portfolio_df, confidence=0.95):
             if d is not None: data[t] = d['Close'].pct_change()
         
         data.dropna(inplace=True)
-        # Approximate weights
+        # Calculate weights based on current holdings
         weights = (portfolio_df.groupby('Ticker')['Shares'].sum() * portfolio_df.groupby('Ticker')['Buy_Price_USD'].mean()) / total_val
-        # Align weights with data columns
-        common_cols = [c for c in data.columns if c in weights.index]
-        weights = weights[common_cols]
-        data = data[common_cols]
+        
+        # Ensure alignment
+        common = [c for c in data.columns if c in weights.index]
+        if not common: return 0.0
+        
+        weights = weights[common]
+        data = data[common]
         
         port_ret = data.dot(weights.values)
         var_pct = np.percentile(port_ret, (1-confidence)*100)
@@ -311,7 +328,7 @@ def get_sector_heatmap():
     s = {"Tech": "XLK", "Finance": "XLF", "Energy": "XLE", "Health": "XLV", "Consumer": "XLY"}
     return {k: yf.Ticker(v).history(period="2d")['Close'].pct_change().iloc[-1]*100 for k, v in s.items()}
 
-# --- 6. EXTRAS ---
+# --- 6. EXTRAS (Watchlist, Alerts, Backtest) ---
 def get_watchlist():
     if os.path.exists("watchlist.txt"):
         with open("watchlist.txt", "r") as f: return [l.strip() for l in f.readlines() if l.strip()]
