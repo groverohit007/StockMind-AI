@@ -77,6 +77,9 @@ def add_technical_overlays(df):
 import pdfplumber # NEW: Add to requirements.txt
 
 def process_t212_pdf(file):
+    """
+    Parses Trading 212 PDF, cleans headers, and automatically finds Tickers for Company Names.
+    """
     extracted_data = []
     try:
         with pdfplumber.open(file) as pdf:
@@ -86,7 +89,7 @@ def process_t212_pdf(file):
                     if not table or len(table) < 2: continue
                     
                     df_tmp = pd.DataFrame(table)
-                    # Normalize headers to handle newlines (found in source [8, 17, 27])
+                    # 1. Normalize Headers (Remove newlines/spaces)
                     headers = [str(c).strip().replace('\n', '').upper() for c in df_tmp.iloc[0]]
                     
                     if "INSTRUMENT" in headers:
@@ -96,34 +99,31 @@ def process_t212_pdf(file):
                         
                         df_rows = df_tmp.iloc[1:]
                         for _, row in df_rows.iterrows():
-                            # Extract full name from the PDF cell 
+                            # 2. Get Full Company Name
                             full_name = str(row[idx_inst]).split('\n')[0].strip()
                             
-                            # Perform Ticker Lookup
-                            ticker_results = search_ticker(full_name)
-                            if ticker_results:
-                                # Grab the first/best ticker symbol from search
-                                ticker = list(ticker_results.values())[0]
+                            # 3. AUTO-DISCOVERY: Convert Name to Ticker
+                            # We search Yahoo for the name. If found, we take the top result.
+                            # If not, we blindly use the first word (fallback).
+                            found_ticker = search_ticker(full_name)
+                            if found_ticker:
+                                ticker = list(found_ticker.values())[0] # Take first result
                             else:
-                                # Fallback to first word if search fails
-                                ticker = full_name.split()[0].upper()
+                                ticker = full_name.split()[0].upper() # Fallback
                             
-                            # Clean Quantity: Handle "27:431" format
+                            # 4. Clean Quantity (Handle '27:431' format)
                             qty_str = str(row[idx_qty]).replace(':', '.').replace(',', '').strip()
                             try:
                                 qty = float(qty_str)
-                            except:
-                                continue
+                            except: continue
                             
-                            # Clean Price & Handle GBX (Pence) to GBP conversion
+                            # 5. Clean Price (Handle GBX/GBP/USD)
                             price_raw = str(row[idx_price]).upper()
                             p_str = "".join(c for c in price_raw if c.isdigit() or c in '.-')
                             try:
                                 price_val = float(p_str)
-                                if "GBX" in price_raw:
-                                    price_val = price_val / 100
-                            except:
-                                price_val = 0.0
+                                if "GBX" in price_raw: price_val /= 100 # Convert Pence to Pounds
+                            except: price_val = 0.0
 
                             if qty > 0:
                                 extracted_data.append({
@@ -522,6 +522,50 @@ def run_backtest(ticker, initial_capital=10000):
     processed['Equity'] = equity
     final = equity[-1]
     return processed, pd.DataFrame(trades), ((final-initial_capital)/initial_capital)*100
+    # --- [NEW] WATCHDOG BACKGROUND SYSTEM ---
+import time
+import threading
+
+def run_watchdog_scan(tele_token, tele_chat, threshold=0.7):
+    """
+    Scans the portfolio. If AI Confidence > threshold, sends a Telegram alert.
+    """
+    df = get_portfolio()
+    if df.empty or 'Ticker' not in df.columns: return "❌ Portfolio Empty"
+    
+    # Filter for OPEN positions only
+    active_tickers = df[df['Status'] == 'OPEN']['Ticker'].unique()
+    alerts_sent = 0
+    
+    msg_buffer = "🚨 *Watchdog Report*\n"
+    
+    for ticker in active_tickers:
+        try:
+            # Run AI Model
+            data = get_data(ticker, period="6mo", interval="1d")
+            if data is not None:
+                processed, _, _ = train_consensus_model(data)
+                if processed is not None:
+                    last = processed.iloc[-1]
+                    conf = last['Confidence']
+                    
+                    # ALERT LOGIC:
+                    # 1. Buy Signal with High Confidence
+                    if conf > threshold:
+                        msg_buffer += f"\n🟢 *{ticker}*: BUY (Conf: {conf*100:.0f}%)"
+                        alerts_sent += 1
+                    # 2. Sell Signal (Panic Button)
+                    elif conf < (1.0 - threshold):
+                        msg_buffer += f"\n🔴 *{ticker}*: SELL/DUMP (Conf: {(1-conf)*100:.0f}%)"
+                        alerts_sent += 1
+        except: continue
+        
+    if alerts_sent > 0:
+        send_telegram_alert(tele_token, tele_chat, msg_buffer)
+        return f"✅ Sent {alerts_sent} alerts to Telegram!"
+    else:
+        return "🐶 Watchdog scanned. No significant moves detected."
+
 
 
 
