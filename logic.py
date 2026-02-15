@@ -5,7 +5,6 @@ import streamlit as st
 import requests
 import os
 import pdfplumber
-import io
 import re
 from scipy.optimize import minimize
 from ta.momentum import RSIIndicator
@@ -20,8 +19,7 @@ def search_ticker(query, region="All"):
     try:
         url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=20&newsCount=0"
         headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers)
-        data = response.json()
+        response = requests.get(url, headers=headers).json()
         results = {}
         filters = {
             "USA (NASDAQ/NYSE)": ["NMS", "NYQ", "NGM", "ASE", "NCM", "PNK"],
@@ -30,8 +28,8 @@ def search_ticker(query, region="All"):
             "All": []
         }
         allowed = filters.get(region, [])
-        if 'quotes' in data:
-            for q in data['quotes']:
+        if 'quotes' in response:
+            for q in response['quotes']:
                 s, n, e = q.get('symbol'), q.get('shortname') or q.get('longname'), q.get('exchange')
                 if s and n and e and (region == "All" or e in allowed):
                     results[f"{n} ({s}) - {e}"] = s
@@ -57,7 +55,7 @@ def add_technical_overlays(df):
     return df
 
 # --- 2. TRADING 212 PDF PARSER (ROBUST) ---
-def process_t212_pdf(uploaded_file):
+def process_t212_pdf(file):
     """
     Robust parser for Trading 212 'Confirmation of Holdings' PDFs.
     """
@@ -69,13 +67,15 @@ def process_t212_pdf(uploaded_file):
         except: return None
     def _infer_ticker(instrument):
         name = _norm(instrument).upper()
+        # Look for (TICKER) pattern, otherwise use first word
         m = re.search(r"\(([A-Z0-9\.\-]{1,15})\)", name)
         return m.group(1) if m else name.split()[0]
 
     extracted = []
     try:
-        uploaded_file.seek(0)
-        with pdfplumber.open(uploaded_file) as pdf:
+        # Reset file pointer just in case
+        file.seek(0)
+        with pdfplumber.open(file) as pdf:
             for page in pdf.pages:
                 tables = page.extract_tables() or []
                 for table in tables:
@@ -92,8 +92,10 @@ def process_t212_pdf(uploaded_file):
 
                     header = [_norm(x).upper() for x in table[header_idx]]
                     try:
+                        # Find relevant column indices
                         c_inst = [i for i, h in enumerate(header) if "INSTRUMENT" in h][0]
                         c_qty = [i for i, h in enumerate(header) if "QUANTITY" in h][0]
+                        # Price might be "PRICE", "AVG PRICE", etc.
                         c_price = [i for i, h in enumerate(header) if "PRICE" in h][0]
                     except: continue
 
@@ -161,6 +163,7 @@ def execute_trade(ticker, price_usd, shares, action, currency="USD"):
 def get_exchange_rate(base_currency="GBP"):
     if base_currency == "USD": return 1.0
     try:
+        # Check exchange rate
         d = yf.Ticker(f"{base_currency}USD=X").history(period="1d")
         return 1.0 / d['Close'].iloc[-1] if not d.empty else 0.78
     except: return 0.78
@@ -176,7 +179,7 @@ def train_consensus_model(data):
     df['SMA_50'] = SMAIndicator(close=df["Close"], window=50).sma_indicator()
     df['ATR'] = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"], window=14).average_true_range()
     
-    # Lagged Features
+    # Lagged Features (Memory)
     df['Lag_1'] = df['Close'].pct_change().shift(1)
     df['Lag_2'] = df['Close'].pct_change().shift(2)
     df['Lag_5'] = df['Close'].pct_change().shift(5)
@@ -210,16 +213,15 @@ def train_consensus_model(data):
 
 # --- 5. MISSING FUNCTIONS RESTORED ---
 def predict_long_term_trends(data):
-    """Restored Forecast Function"""
+    """
+    Predicts 1W, 1M, 3M, 6M trends.
+    """
     df = data.copy()
     horizons = {"1 Week": 5, "1 Month": 20, "3 Months": 60, "6 Months": 120}
     preds = {}
     
-    df['RSI'] = RSIIndicator(close=df["Close"]).rsi()
-    df['SMA_50'] = SMAIndicator(close=df["Close"], window=50).sma_indicator()
-    
+    # We use simple price change logic if ML data is insufficient
     for k, v in horizons.items():
-        # Simple trend logic if not enough data for ML
         if len(df) > v:
             change = (df['Close'].iloc[-1] / df['Close'].iloc[-v] - 1)
             preds[k] = "Bullish 🟢" if change > 0.02 else "Bearish 🔴" if change < -0.02 else "Neutral ⚪"
@@ -262,9 +264,12 @@ def calculate_portfolio_var(portfolio_df, confidence=0.95):
             if d is not None: data[t] = d['Close'].pct_change()
         
         data.dropna(inplace=True)
+        # Approximate weights
         weights = (portfolio_df.groupby('Ticker')['Shares'].sum() * portfolio_df.groupby('Ticker')['Buy_Price_USD'].mean()) / total_val
         # Align weights with data columns
-        weights = weights[data.columns]
+        common_cols = [c for c in data.columns if c in weights.index]
+        weights = weights[common_cols]
+        data = data[common_cols]
         
         port_ret = data.dot(weights.values)
         var_pct = np.percentile(port_ret, (1-confidence)*100)
@@ -274,8 +279,11 @@ def calculate_portfolio_var(portfolio_df, confidence=0.95):
 def get_correlation_matrix(portfolio_df):
     try:
         tickers = portfolio_df['Ticker'].unique().tolist()
-        data = pd.DataFrame({t: get_data(t, period="6mo")['Close'] for t in tickers})
-        return data.corr()
+        data = pd.DataFrame()
+        for t in tickers:
+            d = get_data(t, period="6mo")
+            if d is not None: data[t] = d['Close']
+        return data.dropna().corr()
     except: return None
 
 def get_fundamentals(ticker):
