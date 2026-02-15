@@ -78,40 +78,64 @@ import pdfplumber # NEW: Add to requirements.txt
 
 def process_t212_pdf(file):
     """
-    Parses a Trading 212 Statement PDF and extracts stock data.
-    Expected Columns: Instrument, ISIN, Quantity, Average price
+    Specifically tuned for Trading 212 'Confirmation of Holdings' PDF.
+    Extracts Instrument, Quantity, and Price across multiple pages.
     """
     extracted_data = []
     try:
         with pdfplumber.open(file) as pdf:
             for page in pdf.pages:
-                table = page.extract_table()
-                if table:
-                    df_pdf = pd.DataFrame(table[1:], columns=table[0])
-                    # Trading 212 Column cleaning
-                    for _, row in df_pdf.iterrows():
-                        ticker_raw = str(row.get('Instrument', ''))
-                        # Extract ticker from "Company Name (TICKER)" format
-                        if '(' in ticker_raw:
-                            ticker = ticker_raw.split('(')[-1].split(')')[0]
-                        else:
-                            ticker = ticker_raw
-                            
-                        quantity = float(str(row.get('Quantity', 0)).replace(',', ''))
-                        price = float(str(row.get('Average price', 0)).replace('$', '').replace(',', ''))
+                tables = page.extract_tables()
+                for table in tables:
+                    df_tmp = pd.DataFrame(table)
+                    
+                    # Identify the correct table by checking headers in the first row
+                    if df_tmp.shape[1] >= 4 and "INSTRUMENT" in str(df_tmp.iloc[0,0]).upper():
+                        # Set headers and remove header row
+                        df_tmp.columns = ["Instrument", "ISIN", "Quantity", "Price"]
+                        df_tmp = df_tmp.iloc[1:].reset_index(drop=True)
                         
-                        if ticker and quantity > 0:
-                            extracted_data.append({
-                                "Ticker": ticker.strip().upper(),
-                                "Buy_Price_GBP": price,
-                                "Shares": quantity,
-                                "Date": pd.Timestamp.now(),
-                                "Status": "OPEN",
-                                "Currency": "GBP"
-                            })
+                        for _, row in df_tmp.iterrows():
+                            # Clean Instrument name to get Ticker (e.g., Apple Inc -> AAPL)
+                            # Note: The PDF lacks () for tickers, so we use the first word or lookup
+                            instr_name = str(row['Instrument']).split()[0].upper()
+                            
+                            # Clean Quantity (Handling cases like '27:431' or standard floats)
+                            qty_str = str(row['Quantity']).replace(':', '.').replace(',', '').strip()
+                            try:
+                                qty = float(qty_str)
+                            except:
+                                qty = 0.0
+                            
+                            # Clean Price (Handling 'USD 255.3' or 'GBX 1271')
+                            price_raw = str(row['Price']).upper()
+                            price_val = 0.0
+                            
+                            # If it's GBX (pence), convert to GBP by dividing by 100
+                            if "GBX" in price_raw:
+                                p_str = price_raw.replace("GBX", "").replace(",", "").strip()
+                                price_val = float(p_str) / 100 if p_str else 0.0
+                            else:
+                                # Standard USD/GBP/EUR
+                                p_str = price_raw.replace("USD", "").replace("GBP", "").replace("EUR", "").replace(",", "").strip()
+                                try:
+                                    price_val = float(p_str)
+                                except:
+                                    price_val = 0.0
+
+                            if instr_name and qty > 0:
+                                extracted_data.append({
+                                    "Ticker": instr_name, # Fallback to first word as ticker
+                                    "Buy_Price_USD": price_val, 
+                                    "Shares": qty,
+                                    "Date": pd.Timestamp.now(),
+                                    "Status": "OPEN",
+                                    "Currency": "GBP" if "GBX" in price_raw or "GBP" in price_raw else "USD"
+                                })
+                                
         return pd.DataFrame(extracted_data)
     except Exception as e:
-        print(f"PDF Error: {e}")
+        print(f"Extraction Error: {e}")
         return None
 
 def sync_portfolio_with_df(new_data_df):
