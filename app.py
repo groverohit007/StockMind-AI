@@ -156,10 +156,44 @@ with tabs[0]:
     col1, col2 = st.columns([3, 1])
     
     with col1:
-        ticker_input = st.text_input(
-            "Enter Stock Ticker",
-            placeholder="e.g., AAPL, MSFT, GOOGL",
-            key="ticker_terminal"
+        search_type = st.radio(
+    "Search by:",
+    ["Ticker Symbol", "Company Name"],
+    horizontal=True,
+    key="search_type"
+)
+
+ticker_input = None
+
+if search_type == "Ticker Symbol":
+    ticker_input = st.text_input(
+        "Enter Stock Ticker",
+        placeholder="e.g., AAPL, MSFT, GOOGL",
+        key="ticker_terminal"
+    )
+else:
+    # Company Name Search
+    company_name = st.text_input(
+        "Enter Company Name",
+        placeholder="e.g., Apple, Microsoft, Google",
+        key="company_search"
+    )
+    
+    if company_name and len(company_name) > 2:
+        with st.spinner("🔍 Searching..."):
+            results = logic.search_company_by_name(company_name)
+            
+            if results:
+                selected = st.selectbox(
+                    "Select Company:",
+                    list(results.keys()),
+                    key="company_select"
+                )
+                ticker_input = results[selected]
+                st.info(f"✅ Selected: **{ticker_input}**")
+            else:
+                st.warning("⚠️ No results. Try different name.")
+                ticker_input = None
         )
     
     with col2:
