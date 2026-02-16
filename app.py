@@ -599,8 +599,58 @@ with tabs[2]:
 # ============================================================================
 with tabs[3]:
     st.title("💼 Portfolio Manager")
+
+st.title("💼 Portfolio Manager")
     
-    portfolio = logic.get_portfolio()
+    # NEW: Portfolio Upload Feature
+    st.subheader("📤 Upload Portfolio")
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        uploaded_file = st.file_uploader(
+            "Upload your portfolio (Excel or CSV)",
+            type=['xlsx', 'csv'],
+            help="File should have: Ticker, Shares, Buy Price"
+        )
+    
+    with col2:
+        st.download_button(
+            label="📥 Template",
+            data=b"Ticker,Shares,Buy Price,Date\\nAAPL,10,150.00,2024-01-01\\nMSFT,5,300.00,2024-01-15",
+            file_name="portfolio_template.csv",
+            mime="text/csv"
+        )
+    
+    if uploaded_file:
+        try:
+            # Read file
+            if uploaded_file.name.endswith('.csv'):
+                df = pd.read_csv(uploaded_file)
+            else:
+                df = pd.read_excel(uploaded_file)
+            
+            st.success(f"✅ Loaded {len(df)} positions")
+            st.dataframe(df)
+            
+            # Save button
+            if st.button("💾 Save to Portfolio"):
+                for _, row in df.iterrows():
+                    logic.execute_trade(
+                        ticker=row['Ticker'],
+                        price_usd=row['Buy Price'],
+                        shares=row['Shares'],
+                        action="BUY",
+                        currency="USD"
+                    )
+                st.success("✅ Portfolio saved!")
+                st.rerun()
+        except Exception as e:
+            st.error(f"❌ Error: {str(e)}")
+            st.info("File needs: Ticker, Shares, Buy Price")
+    
+    st.markdown("---")
+        portfolio = logic.get_portfolio()
     
     if not portfolio.empty:
         # Calculate current values
