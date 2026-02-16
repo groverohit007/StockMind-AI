@@ -194,7 +194,6 @@ else:
             else:
                 st.warning("⚠️ No results. Try different name.")
                 ticker_input = None
-        )
     
     with col2:
         st.markdown("<br>", unsafe_allow_html=True)
@@ -218,7 +217,7 @@ else:
         
         # Get stock data
         with st.spinner(f"📊 Fetching data for {ticker}..."):
-    data = logic.get_data(ticker, period="2y")
+            data = logic.get_data(ticker, period="2y")
 
 # BETTER ERROR HANDLING
 if data is None or len(data) < 50:
