@@ -1,11 +1,23 @@
-streamlit
-yfinance
-pandas
-ta
-numpy<2.0.0
-scikit-learn
-plotly
-openai
-requests
-scipy
-pdfplumber
+# StockMind-AI Production Requirements
+streamlit==1.28.0
+yfinance==0.2.28
+pandas==2.0.3
+numpy==1.24.3
+scipy==1.11.0
+ta==0.11.0
+scikit-learn==1.3.0
+plotly==5.17.0
+openai==1.3.0
+requests==2.31.0
+pdfplumber==0.10.0
+openpyxl==3.1.2
+xlrd==2.0.1
+tenacity==8.2.3
+joblib==1.3.2
+
+# Advanced ML models (highly recommended)
+xgboost==2.0.1
+lightgbm==4.1.0
+
+# Optional: CatBoost (comment out if installation issues)
+# catboost==1.2.2
