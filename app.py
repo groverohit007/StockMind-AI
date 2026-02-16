@@ -217,7 +217,17 @@ else:
                 st.stop()
         
         # Get stock data
-        data = logic.get_data(ticker, period="2y")
+        with st.spinner(f"📊 Fetching data for {ticker}..."):
+    data = logic.get_data(ticker, period="2y")
+
+# BETTER ERROR HANDLING
+if data is None or len(data) < 50:
+    st.error(f"❌ Unable to fetch data for **{ticker}**")
+    st.info("💡 **Possible reasons:**")
+    st.write("• Ticker symbol may be incorrect")
+    st.write("• Market might be closed")
+    st.write("• Try: MSFT, GOOGL, TSLA, NVDA")
+    st.stop()
         
         if data is None or len(data) < 50:
             st.error(f"❌ Unable to fetch data for {ticker}. Please check the ticker symbol.")
