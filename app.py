@@ -207,7 +207,7 @@ else:
                 logic.add_to_watchlist(ticker_input.upper())
                 st.success(f"✅ Added {ticker_input.upper()} to watchlist")
     
-    if analyze_button and ticker_input:
+  if analyze_button and ticker_input:
         ticker = ticker_input.upper()
         
         # Check prediction limit (if subscriptions enabled)
@@ -219,17 +219,13 @@ else:
         with st.spinner(f"📊 Fetching data for {ticker}..."):
             data = logic.get_data(ticker, period="2y")
 
-# BETTER ERROR HANDLING
-if data is None or len(data) < 50:
-    st.error(f"❌ Unable to fetch data for **{ticker}**")
-    st.info("💡 **Possible reasons:**")
-    st.write("• Ticker symbol may be incorrect")
-    st.write("• Market might be closed")
-    st.write("• Try: MSFT, GOOGL, TSLA, NVDA")
-    st.stop()
-        
+        # Error Handling
         if data is None or len(data) < 50:
-            st.error(f"❌ Unable to fetch data for {ticker}. Please check the ticker symbol.")
+            st.error(f"❌ Unable to fetch data for **{ticker}**")
+            st.info("💡 **Possible reasons:**")
+            st.write("• Ticker symbol may be incorrect")
+            st.write("• Market might be closed")
+            st.write("• Try: MSFT, GOOGL, TSLA, NVDA")
             st.stop()
         
         # Make AI Predictions
