@@ -157,44 +157,44 @@ with tabs[0]:
     
     with col1:
         search_type = st.radio(
-    "Search by:",
-    ["Ticker Symbol", "Company Name"],
-    horizontal=True,
-    key="search_type"
-)
-
-ticker_input = None
-
-if search_type == "Ticker Symbol":
-    ticker_input = st.text_input(
-        "Enter Stock Ticker",
-        placeholder="e.g., AAPL, MSFT, GOOGL",
-        key="ticker_terminal"
-    )
-else:
-    # Company Name Search
-    company_name = st.text_input(
-        "Enter Company Name",
-        placeholder="e.g., Apple, Microsoft, Google",
-        key="company_search"
-    )
-    
-    if company_name and len(company_name) > 2:
-        with st.spinner("🔍 Searching..."):
-            results = logic.search_company_by_name(company_name)
+            "Search by:",
+            ["Ticker Symbol", "Company Name"],
+            horizontal=True,
+            key="search_type"
+        )
+        
+        ticker_input = None
+        
+        if search_type == "Ticker Symbol":
+            ticker_input = st.text_input(
+                "Enter Stock Ticker",
+                placeholder="e.g., AAPL, MSFT, GOOGL",
+                key="ticker_terminal"
+            )
+        else:
+            # Company Name Search
+            company_name = st.text_input(
+                "Enter Company Name",
+                placeholder="e.g., Apple, Microsoft, Google",
+                key="company_search"
+            )
             
-            if results:
-                selected = st.selectbox(
-                    "Select Company:",
-                    list(results.keys()),
-                    key="company_select"
-                )
-                ticker_input = results[selected]
-                st.info(f"✅ Selected: **{ticker_input}**")
-            else:
-                st.warning("⚠️ No results. Try different name.")
-                ticker_input = None
-    
+            if company_name and len(company_name) > 2:
+                with st.spinner("🔍 Searching..."):
+                    results = logic.search_company_by_name(company_name)
+                    
+                    if results:
+                        selected = st.selectbox(
+                            "Select Company:",
+                            list(results.keys()),
+                            key="company_select"
+                        )
+                        ticker_input = results[selected]
+                        st.info(f"✅ Selected: **{ticker_input}**")
+                    else:
+                        st.warning("⚠️ No results. Try different name.")
+                        ticker_input = None
+
     with col2:
         st.markdown("<br>", unsafe_allow_html=True)
         analyze_button = st.button("🤖 Analyze", type="primary", use_container_width=True)
@@ -207,7 +207,7 @@ else:
                 logic.add_to_watchlist(ticker_input.upper())
                 st.success(f"✅ Added {ticker_input.upper()} to watchlist")
     
-  if analyze_button and ticker_input:
+    if analyze_button and ticker_input:
         ticker = ticker_input.upper()
         
         # Check prediction limit (if subscriptions enabled)
@@ -216,9 +216,10 @@ else:
                 st.stop()
         
         # Get stock data
+        data = None
         with st.spinner(f"📊 Fetching data for {ticker}..."):
             data = logic.get_data(ticker, period="2y")
-
+        
         # Error Handling
         if data is None or len(data) < 50:
             st.error(f"❌ Unable to fetch data for **{ticker}**")
@@ -594,8 +595,6 @@ with tabs[2]:
 # ============================================================================
 with tabs[3]:
     st.title("💼 Portfolio Manager")
-
-st.title("💼 Portfolio Manager")
     
     # NEW: Portfolio Upload Feature
     st.subheader("📤 Upload Portfolio")
@@ -645,7 +644,9 @@ st.title("💼 Portfolio Manager")
             st.info("File needs: Ticker, Shares, Buy Price")
     
     st.markdown("---")
-        portfolio = logic.get_portfolio()
+    
+    # Portfolio Display Logic
+    portfolio = logic.get_portfolio()
     
     if not portfolio.empty:
         # Calculate current values
