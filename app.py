@@ -38,6 +38,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
+import time
 
 # ============================================================================
 # PAGE CONFIGURATION
@@ -54,6 +55,15 @@ st.set_page_config(
 # ============================================================================
 st.markdown("""
 <style>
+    @keyframes fadeInMain {
+        0% { opacity: 0; transform: translateY(10px); }
+        100% { opacity: 1; transform: translateY(0); }
+    }
+
+    .main .block-container {
+        animation: fadeInMain 0.6s ease-out;
+    }
+
     .main-header {
         font-size: 3rem;
         font-weight: bold;
@@ -84,6 +94,45 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
+# Login transition animation (one-time after successful login)
+if SUBSCRIPTIONS_ENABLED and st.session_state.get('show_login_transition', False):
+    transition_placeholder = st.empty()
+    transition_placeholder.markdown(
+        """
+        <div style="
+            text-align:center;
+            padding: 2rem;
+            background: linear-gradient(135deg, rgba(0,212,255,0.12), rgba(0,102,255,0.12));
+            border: 1px solid rgba(0,212,255,0.35);
+            border-radius: 14px;
+            margin-bottom: 1rem;
+        ">
+            <h3 style="margin-bottom: 0.5rem;">🚀 Welcome to StockMind-AI Pro</h3>
+            <p style="opacity: 0.9; margin-bottom: 0;">Loading your dashboard...</p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+    time.sleep(1.0)
+    st.session_state['show_login_transition'] = False
+    transition_placeholder.empty()
+
+# Premium upgrade popup (shown after premium user login)
+if SUBSCRIPTIONS_ENABLED and st.session_state.get('show_premium_popup', False):
+    st.success("🎉 Congratulations! You have been upgraded to Premium.")
+    st.info(
+        "**Premium AI engine activated (75%–85% target accuracy):**\n"
+        "• Random Forest\n"
+        "• Gradient Boosting\n"
+        "• Extra Trees\n"
+        "• HistGradientBoosting\n"
+        "• XGBoost (if available)\n"
+        "• LightGBM (if available)\n"
+        "• AI-enhanced multi-timeframe signal layer"
+    )
+    st.balloons()
+    st.session_state['show_premium_popup'] = False
 
 # ============================================================================
 # SIDEBAR
