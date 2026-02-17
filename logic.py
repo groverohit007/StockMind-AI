@@ -698,7 +698,8 @@ def create_ultimate_features(data, forward_period=5, threshold=0.003):
     df['Forward_Return'] = df['Close'].pct_change(forward_period).shift(-forward_period)
     df['Target'] = (df['Forward_Return'] > threshold).astype(int)
     
-    # Drop NaN
+    # Clean invalid numeric values that can appear in intraday/noisy bars
+    df = df.replace([np.inf, -np.inf], np.nan)
     df = df.dropna()
     
     return df
@@ -795,8 +796,16 @@ def train_ultimate_model(data, ticker, interval, forward_period=5, threshold=0.0
         
         # Prepare data
         feature_cols = [col for col in df.columns if col not in ['Target', 'Forward_Return']]
-        X = df[feature_cols]
+        X = df[feature_cols].replace([np.inf, -np.inf], np.nan)
         y = df['Target']
+
+        # Keep only rows with finite features (prevents scaler/model crashes)
+        valid_mask = X.notna().all(axis=1)
+        X = X.loc[valid_mask]
+        y = y.loc[valid_mask]
+
+        if len(X) < 60:
+            return None
         
         # Scale features
         scaler = RobustScaler()
@@ -1043,7 +1052,7 @@ def get_multi_timeframe_predictions(ticker, user_tier='free'):
                     data, forward_period=fwd_period, threshold=thresh
                 )
                 feature_cols = model_result['feature_cols']
-                X = df[feature_cols].iloc[-1:].values
+                X = df[feature_cols].iloc[-1:]
                 X_scaled = model_result['scaler'].transform(X)
 
                 # Get prediction and probability
