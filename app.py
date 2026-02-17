@@ -786,21 +786,12 @@ with tabs[5]:
                         st.error("❌ Failed to update password")
 
         with st.expander("🧩 API configuration", expanded=True):
-            st.caption("Primary source is .streamlit/secrets.toml (env vars also supported). DB values are fallback only.")
-
-            # Show effective key status resolved from env/secrets/DB
-            key_status = logic.get_api_key_status()
-            st.write(f"Alpha Vantage: {'✅ Configured' if key_status['alpha_vantage'] else '❌ Missing'}")
-            st.write(f"News API: {'✅ Configured' if key_status['newsapi'] else '❌ Missing'}")
-            st.write(f"OpenAI API: {'✅ Configured' if key_status['openai'] else '❌ Missing'}")
-
             existing_settings = db.get_app_settings()
             with st.form("admin_api_settings_form"):
-                st.write("Optional fallback values (used only if secrets/env are missing):")
-                alpha_vantage_key = st.text_input("Alpha Vantage API Key (fallback)", value=existing_settings.get("alpha_vantage_api_key", ""), type="password")
-                news_api_key = st.text_input("News API Key (fallback)", value=existing_settings.get("news_api_key", ""), type="password")
-                openai_api_key = st.text_input("OpenAI API Key (fallback)", value=existing_settings.get("openai_api_key", ""), type="password")
-                save_apis = st.form_submit_button("Save fallback API settings")
+                alpha_vantage_key = st.text_input("Alpha Vantage API Key", value=existing_settings.get("alpha_vantage_api_key", ""), type="password")
+                news_api_key = st.text_input("News API Key", value=existing_settings.get("news_api_key", ""), type="password")
+                openai_api_key = st.text_input("OpenAI API Key", value=existing_settings.get("openai_api_key", ""), type="password")
+                save_apis = st.form_submit_button("Save API settings")
 
                 if save_apis:
                     ok = all([
@@ -809,9 +800,9 @@ with tabs[5]:
                         db.set_app_setting("openai_api_key", openai_api_key.strip())
                     ])
                     if ok:
-                        st.success("✅ Fallback API settings saved")
+                        st.success("✅ API settings saved")
                     else:
-                        st.error("❌ Failed saving one or more fallback settings")
+                        st.error("❌ Failed saving one or more API settings")
 
         with st.expander("📧 User emails (marketing list)", expanded=True):
             emails = db.get_all_user_emails()
