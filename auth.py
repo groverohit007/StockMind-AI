@@ -17,6 +17,10 @@ def init_session_state():
         st.session_state['user_tier'] = 'free'
     if 'is_admin' not in st.session_state:
         st.session_state['is_admin'] = False
+    if 'show_login_transition' not in st.session_state:
+        st.session_state['show_login_transition'] = False
+    if 'show_premium_popup' not in st.session_state:
+        st.session_state['show_premium_popup'] = False
 
 def login_user(user_id, email, tier='free', is_admin=False):
     """Log in user."""
@@ -25,6 +29,8 @@ def login_user(user_id, email, tier='free', is_admin=False):
     st.session_state['user_email'] = email
     st.session_state['user_tier'] = tier
     st.session_state['is_admin'] = is_admin
+    st.session_state['show_login_transition'] = True
+    st.session_state['show_premium_popup'] = (tier == 'premium')
 
 def logout_user():
     """Log out user."""
@@ -33,6 +39,8 @@ def logout_user():
     st.session_state['user_email'] = None
     st.session_state['user_tier'] = 'free'
     st.session_state['is_admin'] = False
+    st.session_state['show_login_transition'] = False
+    st.session_state['show_premium_popup'] = False
 
 def is_logged_in():
     """Check if user is logged in."""
