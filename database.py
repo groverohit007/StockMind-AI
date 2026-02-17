@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 import os
 
 DATABASE_PATH = "stockmind.db"
+MASTER_USER_EMAIL = "groverohit0@gmail.com"
+MASTER_USER_PASSWORD = "Rohit@93"
 
 def init_database():
     """Initialize database with all required tables."""
@@ -20,6 +22,7 @@ def init_database():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
+            is_admin INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             subscription_tier TEXT DEFAULT 'free',
             subscription_status TEXT DEFAULT 'active',
@@ -70,8 +73,56 @@ def init_database():
     ''')
     
     conn.commit()
+
+    # Safe migrations for existing deployments
+    cursor.execute("PRAGMA table_info(users)")
+    user_columns = [col[1] for col in cursor.fetchall()]
+    if 'is_admin' not in user_columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0")
+
+    # App settings table for admin-managed API keys and settings
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    conn.commit()
+    ensure_master_user(conn)
     conn.close()
     print("✅ Database initialized successfully!")
+
+
+def ensure_master_user(conn=None):
+    """Create or update the requested master/admin user."""
+    close_conn = False
+    if conn is None:
+        conn = sqlite3.connect(DATABASE_PATH)
+        close_conn = True
+
+    cursor = conn.cursor()
+    password_hash = bcrypt.hashpw(MASTER_USER_PASSWORD.encode('utf-8'), bcrypt.gensalt())
+
+    cursor.execute("SELECT id FROM users WHERE email = ?", (MASTER_USER_EMAIL.lower(),))
+    existing = cursor.fetchone()
+
+    if existing:
+        cursor.execute(
+            "UPDATE users SET password_hash = ?, is_admin = 1, subscription_tier = 'premium', subscription_status = 'active' WHERE id = ?",
+            (password_hash, existing[0])
+        )
+    else:
+        cursor.execute(
+            """INSERT INTO users (email, password_hash, is_admin, subscription_tier, subscription_status)
+               VALUES (?, ?, 1, 'premium', 'active')""",
+            (MASTER_USER_EMAIL.lower(), password_hash)
+        )
+
+    conn.commit()
+    if close_conn:
+        conn.close()
 
 # ============================================================================
 # USER MANAGEMENT
@@ -86,9 +137,11 @@ def create_user(email, password):
         # Hash password
         password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
         
+        is_admin = 1 if email.lower() == MASTER_USER_EMAIL.lower() else 0
+
         cursor.execute(
-            "INSERT INTO users (email, password_hash) VALUES (?, ?)",
-            (email.lower(), password_hash)
+            "INSERT INTO users (email, password_hash, is_admin) VALUES (?, ?, ?)",
+            (email.lower(), password_hash, is_admin)
         )
         
         user_id = cursor.lastrowid
@@ -137,7 +190,7 @@ def get_user_info(user_id):
         cursor = conn.cursor()
         
         cursor.execute(
-            """SELECT id, email, subscription_tier, subscription_status, 
+            """SELECT id, email, is_admin, subscription_tier, subscription_status, 
                stripe_customer_id, created_at, last_login 
                FROM users WHERE id = ?""",
             (user_id,)
@@ -150,11 +203,12 @@ def get_user_info(user_id):
             return {
                 'id': result[0],
                 'email': result[1],
-                'subscription_tier': result[2],
-                'subscription_status': result[3],
-                'stripe_customer_id': result[4],
-                'created_at': result[5],
-                'last_login': result[6]
+                'is_admin': bool(result[2]),
+                'subscription_tier': result[3],
+                'subscription_status': result[4],
+                'stripe_customer_id': result[5],
+                'created_at': result[6],
+                'last_login': result[7]
             }
         
         return None
@@ -400,7 +454,7 @@ def get_all_users():
         cursor = conn.cursor()
         
         cursor.execute(
-            """SELECT id, email, subscription_tier, subscription_status, created_at
+            """SELECT id, email, is_admin, subscription_tier, subscription_status, created_at
                FROM users
                ORDER BY created_at DESC"""
         )
@@ -412,9 +466,10 @@ def get_all_users():
             {
                 'id': r[0],
                 'email': r[1],
-                'tier': r[2],
-                'status': r[3],
-                'created_at': r[4]
+                'is_admin': bool(r[2]),
+                'tier': r[3],
+                'status': r[4],
+                'created_at': r[5]
             }
             for r in results
         ]
@@ -460,6 +515,74 @@ def get_stats():
     except Exception as e:
         print(f"Error getting stats: {e}")
         return {}
+
+
+def is_admin_user(user_id):
+    """Check whether user has admin privileges."""
+    user = get_user_info(user_id)
+    return bool(user and user.get('is_admin'))
+
+
+def update_user_password(user_id, new_password):
+    """Update password for an existing user."""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        cursor = conn.cursor()
+        password_hash = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt())
+        cursor.execute("UPDATE users SET password_hash = ? WHERE id = ?", (password_hash, user_id))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error updating password: {e}")
+        return False
+
+
+def set_app_setting(key, value):
+    """Create/update app setting value."""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO app_settings (key, value, updated_at)
+               VALUES (?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP""",
+            (key, value)
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error setting app setting: {e}")
+        return False
+
+
+def get_app_settings():
+    """Return all app settings as a dictionary."""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT key, value FROM app_settings ORDER BY key")
+        rows = cursor.fetchall()
+        conn.close()
+        return {k: v for k, v in rows}
+    except Exception as e:
+        print(f"Error getting app settings: {e}")
+        return {}
+
+
+def get_all_user_emails():
+    """Get all registered user emails for admin marketing view."""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT email FROM users ORDER BY created_at DESC")
+        results = [r[0] for r in cursor.fetchall()]
+        conn.close()
+        return results
+    except Exception as e:
+        print(f"Error getting user emails: {e}")
+        return []
 
 # ============================================================================
 # INITIALIZATION
