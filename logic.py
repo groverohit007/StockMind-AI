@@ -94,25 +94,62 @@ def _normalize_ohlcv_columns(data):
 
 
 
-def _get_alpha_vantage_key():
-    """Resolve Alpha Vantage key from env, secrets, or admin settings."""
-    key = os.getenv('ALPHA_VANTAGE_API_KEY', '').strip()
-    if key:
-        return key
+def _resolve_api_key(env_vars, secrets_section, secrets_key, db_setting_key):
+    """Resolve an API key from env vars, st.secrets, or admin DB settings.
 
+    Priority: environment variable > st.secrets > SQLite app_settings.
+    """
+    # Priority 1: Environment variables
+    for var in env_vars:
+        key = os.getenv(var, '').strip()
+        if key:
+            return key
+
+    # Priority 2: Streamlit secrets (secrets.toml / Streamlit Cloud dashboard)
     try:
-        key = st.secrets.get('alpha_vantage', {}).get('api_key', '').strip()
+        key = st.secrets.get(secrets_section, {}).get(secrets_key, '').strip()
         if key:
             return key
     except Exception:
         pass
 
+    # Priority 3: SQLite app_settings table (admin Settings UI)
     try:
         import database as db
-        key = db.get_app_settings().get('alpha_vantage_api_key', '').strip()
+        key = db.get_app_settings().get(db_setting_key, '').strip()
         return key
     except Exception:
         return ''
+
+
+def _get_alpha_vantage_key():
+    """Resolve Alpha Vantage key from env, secrets, or admin settings."""
+    return _resolve_api_key(
+        env_vars=['ALPHA_VANTAGE_API_KEY'],
+        secrets_section='alpha_vantage',
+        secrets_key='api_key',
+        db_setting_key='alpha_vantage_api_key',
+    )
+
+
+def _get_openai_key():
+    """Resolve OpenAI key from env, secrets, or admin settings."""
+    return _resolve_api_key(
+        env_vars=['OPENAI_API_KEY', 'OPENAI_KEY'],
+        secrets_section='openai',
+        secrets_key='api_key',
+        db_setting_key='openai_api_key',
+    )
+
+
+def _get_news_key():
+    """Resolve News API key from env, secrets, or admin settings."""
+    return _resolve_api_key(
+        env_vars=['NEWS_API_KEY'],
+        secrets_section='news',
+        secrets_key='api_key',
+        db_setting_key='news_api_key',
+    )
 
 
 def _get_data_from_alpha_vantage(ticker, interval='1d'):
