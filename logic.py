@@ -233,7 +233,7 @@ def get_data_source_status(ticker):
 
     # Check Yahoo Finance
     try:
-        test = yf.download(ticker, period="5d", progress=False)
+        test = yf.download(ticker, period="5d", progress=False, auto_adjust=False)
         if test is not None and not test.empty:
             status['yahoo_ok'] = True
     except Exception:
@@ -422,16 +422,16 @@ def get_macro_data():
         
         for name, ticker in macro_tickers.items():
             try:
-                data = yf.download(ticker, period="5d", progress=False)
+                data = yf.download(ticker, period="5d", progress=False, auto_adjust=False)
                 if not data.empty:
                     # Handle multi-index if present
                     if isinstance(data.columns, pd.MultiIndex):
                         data.columns = data.columns.get_level_values(0)
-                    
+
                     latest = data['Close'].iloc[-1]
                     prev = data['Close'].iloc[-2] if len(data) > 1 else latest
                     change = ((latest - prev) / prev) * 100
-                    
+
                     results[name] = {
                         'Price': float(latest),
                         'Change': float(change)
@@ -468,12 +468,12 @@ def get_sector_heatmap():
         
         for sector, ticker in sector_etfs.items():
             try:
-                data = yf.download(ticker, period="5d", progress=False)
+                data = yf.download(ticker, period="5d", progress=False, auto_adjust=False)
                 if not data.empty:
                     # Handle multi-index
                     if isinstance(data.columns, pd.MultiIndex):
                         data.columns = data.columns.get_level_values(0)
-                    
+
                     latest = data['Close'].iloc[-1]
                     prev = data['Close'].iloc[-2] if len(data) > 1 else latest
                     change = ((latest - prev) / prev) * 100
