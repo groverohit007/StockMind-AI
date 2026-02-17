@@ -115,69 +115,11 @@ def _get_alpha_vantage_key():
         return ''
 
 
-def get_data_source_status(ticker='AAPL'):
-    """Return data-source diagnostics for UI troubleshooting."""
-    status = {
-        'ticker': ticker,
-        'yahoo_ok': False,
-        'alpha_key_configured': bool(_get_alpha_vantage_key()),
-        'alpha_ok': False,
-        'alpha_message': ''
-    }
-
-    try:
-        quick = yf.download(ticker, period='5d', interval='1d', progress=False, auto_adjust=False, threads=False)
-        quick = _normalize_ohlcv_columns(quick)
-        status['yahoo_ok'] = quick is not None and len(quick) > 0
-    except Exception:
-        status['yahoo_ok'] = False
-
-    if status['alpha_key_configured']:
-        alpha_df, alpha_msg = _get_data_from_alpha_vantage(ticker, interval='1d', return_debug=True)
-        status['alpha_ok'] = alpha_df is not None and len(alpha_df) > 0
-        status['alpha_message'] = alpha_msg
-
-    return status
-
-
-def _resample_to_interval(df, interval):
-    """Resample daily OHLCV data for weekly/monthly model intervals."""
-    if df is None or df.empty:
-        return df
-
-    if interval == '1wk':
-        rule = 'W-FRI'
-    elif interval == '1mo':
-        rule = 'M'
-    else:
-        return df
-
-    return df.resample(rule).agg({
-        'Open': 'first',
-        'High': 'max',
-        'Low': 'min',
-        'Close': 'last',
-        'Volume': 'sum'
-    }).dropna()
-
-
-def _extract_alpha_vantage_error(payload):
-    """Parse common Alpha Vantage error/rate-limit fields."""
-    if not isinstance(payload, dict):
-        return "Invalid response from Alpha Vantage"
-
-    for key in ['Note', 'Information', 'Error Message', 'message']:
-        msg = payload.get(key)
-        if msg:
-            return str(msg)
-    return ''
-
-
-def _get_data_from_alpha_vantage(ticker, interval='1d', return_debug=False):
+def _get_data_from_alpha_vantage(ticker, interval='1d'):
     """Fetch OHLCV data from Alpha Vantage as fallback."""
     api_key = _get_alpha_vantage_key()
     if not api_key:
-        return (None, "Alpha Vantage key not configured") if return_debug else None
+        return None
 
     try:
         if interval in ['1d', '1wk', '1mo']:
@@ -190,33 +132,23 @@ def _get_data_from_alpha_vantage(ticker, interval='1d', return_debug=False):
             }
             response = requests.get('https://www.alphavantage.co/query', params=params, timeout=15)
             payload = response.json()
-            error_msg = _extract_alpha_vantage_error(payload)
-            if error_msg:
-                return (None, error_msg) if return_debug else None
-
             series = payload.get('Time Series (Daily)', {})
             if not series:
-                return (None, "No daily time series returned from Alpha Vantage") if return_debug else None
+                return None
 
             rows = []
             for day, values in series.items():
-                volume_value = values.get('6. volume', values.get('5. volume', 0))
                 rows.append({
                     'Date': pd.to_datetime(day),
                     'Open': float(values['1. open']),
                     'High': float(values['2. high']),
                     'Low': float(values['3. low']),
                     'Close': float(values['4. close']),
-                    'Volume': float(volume_value)
+                    'Volume': float(values['6. volume'])
                 })
 
             df = pd.DataFrame(rows).sort_values('Date').set_index('Date')
-            df = _normalize_ohlcv_columns(df)
-            if df is None or len(df) == 0:
-                return (None, "Invalid OHLCV data returned from Alpha Vantage") if return_debug else None
-
-            df = _resample_to_interval(df, interval)
-            return (df.tail(3000), "ok") if return_debug else df.tail(3000)
+            return df.tail(3000)
 
         # Intraday fallback
         function = 'TIME_SERIES_INTRADAY'
@@ -230,14 +162,10 @@ def _get_data_from_alpha_vantage(ticker, interval='1d', return_debug=False):
         }
         response = requests.get('https://www.alphavantage.co/query', params=params, timeout=15)
         payload = response.json()
-        error_msg = _extract_alpha_vantage_error(payload)
-        if error_msg:
-            return (None, error_msg) if return_debug else None
-
         series_key = next((k for k in payload.keys() if k.startswith('Time Series')), '')
         series = payload.get(series_key, {})
         if not series:
-            return (None, "No intraday time series returned from Alpha Vantage") if return_debug else None
+            return None
 
         rows = []
         for ts, values in series.items():
@@ -250,17 +178,11 @@ def _get_data_from_alpha_vantage(ticker, interval='1d', return_debug=False):
                 'Volume': float(values['5. volume'])
             })
 
-        df = pd.DataFrame(rows).sort_values('Date').set_index('Date')
-        df = _normalize_ohlcv_columns(df)
-        if df is None or len(df) == 0:
-            return (None, "Invalid intraday OHLCV data from Alpha Vantage") if return_debug else None
-
-        return (df, "ok") if return_debug else df
+        return pd.DataFrame(rows).sort_values('Date').set_index('Date')
 
     except Exception as e:
-        message = f"Alpha Vantage fallback failed for {ticker}: {e}"
-        print(message)
-        return (None, message) if return_debug else None
+        print(f"Alpha Vantage fallback failed for {ticker}: {e}")
+        return None
 
 @st.cache_data(ttl=300)
 def get_data(ticker, period="2y", interval="1d"):
