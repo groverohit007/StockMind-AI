@@ -16,9 +16,8 @@ try:
     # Initialize authentication
     auth.init_session_state()
     
-    # Initialize database if it doesn't exist
-    if not os.path.exists('stockmind.db'):
-        db.init_database()
+    # Initialize / migrate database and ensure master admin user
+    db.init_database()
     
     # Check if user is logged in
     if not auth.is_logged_in():
@@ -103,7 +102,10 @@ with st.sidebar:
         
         st.write(f"**Email:** {user_email[:20]}...")
         
-        if user_tier == 'premium':
+        if auth.is_admin():
+            st.success("👑 **Master Admin**")
+            st.write("**Full platform access**")
+        elif user_tier == 'premium':
             st.success("✅ **Premium Member**")
             st.write("**Unlimited Predictions**")
         else:
@@ -221,7 +223,7 @@ with tabs[0]:
             data = logic.get_data(ticker, period="2y")
         
         # Error Handling
-        if data is None or len(data) < 50:
+        if data is None or len(data) < 35:
             st.error(f"❌ Unable to fetch data for **{ticker}**")
             st.info("💡 **Possible reasons:**")
             st.write("• Ticker symbol may be incorrect")
@@ -749,6 +751,64 @@ with tabs[5]:
     st.subheader("📊 Display")
     theme = st.selectbox("Chart Theme", ["Dark", "Light"])
     
+
+    st.markdown("---")
+    st.subheader("👑 Admin Control Center")
+
+    if auth.is_admin():
+        st.success("Master admin mode enabled")
+
+        with st.expander("🔐 Admin password", expanded=False):
+            with st.form("admin_password_form"):
+                new_password = st.text_input("New password", type="password")
+                confirm_password = st.text_input("Confirm new password", type="password")
+                password_submit = st.form_submit_button("Update admin password")
+
+                if password_submit:
+                    if not new_password or len(new_password) < 6:
+                        st.error("Password must be at least 6 characters")
+                    elif new_password != confirm_password:
+                        st.error("Passwords do not match")
+                    elif db.update_user_password(auth.get_current_user_id(), new_password):
+                        st.success("✅ Admin password updated")
+                    else:
+                        st.error("❌ Failed to update password")
+
+        with st.expander("🧩 API configuration", expanded=True):
+            existing_settings = db.get_app_settings()
+            with st.form("admin_api_settings_form"):
+                alpha_vantage_key = st.text_input("Alpha Vantage API Key", value=existing_settings.get("alpha_vantage_api_key", ""), type="password")
+                news_api_key = st.text_input("News API Key", value=existing_settings.get("news_api_key", ""), type="password")
+                openai_api_key = st.text_input("OpenAI API Key", value=existing_settings.get("openai_api_key", ""), type="password")
+                save_apis = st.form_submit_button("Save API settings")
+
+                if save_apis:
+                    ok = all([
+                        db.set_app_setting("alpha_vantage_api_key", alpha_vantage_key.strip()),
+                        db.set_app_setting("news_api_key", news_api_key.strip()),
+                        db.set_app_setting("openai_api_key", openai_api_key.strip())
+                    ])
+                    if ok:
+                        st.success("✅ API settings saved")
+                    else:
+                        st.error("❌ Failed saving one or more API settings")
+
+        with st.expander("📧 User emails (marketing list)", expanded=True):
+            emails = db.get_all_user_emails()
+            if emails:
+                email_df = pd.DataFrame({"email": emails})
+                st.dataframe(email_df, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Download emails CSV",
+                    email_df.to_csv(index=False),
+                    file_name=f"stockmind_user_emails_{datetime.now().date()}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+            else:
+                st.info("No user emails available yet")
+    else:
+        st.info("Admin Control Center is only available for master admin users.")
     st.markdown("---")
     st.subheader("ℹ️ About")
     st.write("**StockMind-AI Pro v2.0**")

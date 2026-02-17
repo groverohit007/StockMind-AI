@@ -15,13 +15,16 @@ def init_session_state():
         st.session_state['user_email'] = None
     if 'user_tier' not in st.session_state:
         st.session_state['user_tier'] = 'free'
+    if 'is_admin' not in st.session_state:
+        st.session_state['is_admin'] = False
 
-def login_user(user_id, email, tier='free'):
+def login_user(user_id, email, tier='free', is_admin=False):
     """Log in user."""
     st.session_state['logged_in'] = True
     st.session_state['user_id'] = user_id
     st.session_state['user_email'] = email
     st.session_state['user_tier'] = tier
+    st.session_state['is_admin'] = is_admin
 
 def logout_user():
     """Log out user."""
@@ -29,6 +32,7 @@ def logout_user():
     st.session_state['user_id'] = None
     st.session_state['user_email'] = None
     st.session_state['user_tier'] = 'free'
+    st.session_state['is_admin'] = False
 
 def is_logged_in():
     """Check if user is logged in."""
@@ -45,6 +49,11 @@ def get_current_user_email():
 def is_premium():
     """Check if user is premium."""
     return st.session_state.get('user_tier') == 'premium'
+
+
+def is_admin():
+    """Check if current user has admin access."""
+    return st.session_state.get('is_admin', False)
 
 def show_login_page():
     """Display login/signup page."""
@@ -66,7 +75,12 @@ def show_login_page():
                     
                     if user_id:
                         user_info = db.get_user_info(user_id)
-                        login_user(user_id, email, user_info['subscription_tier'])
+                        login_user(
+                            user_id,
+                            email,
+                            user_info['subscription_tier'],
+                            user_info.get('is_admin', False)
+                        )
                         st.success("✅ Logged in successfully!")
                         st.rerun()
                     else:
