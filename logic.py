@@ -1228,10 +1228,6 @@ def get_interval_trade_signal(ticker, interval='15m'):
         if data is None or len(data) < 120:
             return None
 
-        # Keep recent bars for speed/stability on intraday calculations
-        if len(data) > 1200:
-            data = data.tail(1200)
-
         model_result = train_ultimate_model(
             data,
             ticker,
@@ -1240,9 +1236,6 @@ def get_interval_trade_signal(ticker, interval='15m'):
             threshold=threshold
         )
 
-        regime_data = get_data(ticker, period='2y', interval='1d')
-        regime = detect_market_regime(regime_data) if regime_data is not None else 'UNKNOWN'
-
         fallback_pred = None
         if model_result is None:
             fallback_pred = _rule_based_fallback_prediction(data)
@@ -1250,16 +1243,15 @@ def get_interval_trade_signal(ticker, interval='15m'):
         if model_result is not None:
             df = create_ultimate_features(data, forward_period=forward_period, threshold=threshold)
             feature_cols = model_result['feature_cols']
-            X = df[feature_cols].iloc[-1:]
+            X = df[feature_cols].iloc[-1:].values
             X_scaled = model_result['scaler'].transform(X)
 
             prediction = model_result['model'].predict(X_scaled)[0]
             proba = model_result['model'].predict_proba(X_scaled)[0]
 
-            adjusted_threshold = _get_regime_adjusted_threshold(0.55, regime)
-            if prediction == 1 and proba[1] > adjusted_threshold:
+            if prediction == 1 and proba[1] > 0.55:
                 signal = 'BUY'
-            elif prediction == 0 and proba[0] > adjusted_threshold:
+            elif prediction == 0 and proba[0] > 0.55:
                 signal = 'SELL'
             else:
                 signal = 'HOLD'
@@ -1294,23 +1286,23 @@ def get_interval_trade_signal(ticker, interval='15m'):
             target_price = current_price
             projected_change_pct = 0.0
 
-        uncertainty = _uncertainty_from_probabilities(probabilities)
-        meta_signal, meta_score = _apply_meta_labeling(signal, confidence, probabilities, regime)
-
         return {
             'signal': signal,
-            'meta_signal': meta_signal,
-            'meta_score': meta_score,
             'confidence': confidence,
             'accuracy': accuracy,
             'probabilities': probabilities,
-            'uncertainty': uncertainty,
-            'regime': regime,
             'interval_label': label,
             'current_price': current_price,
             'target_price': float(target_price),
             'projected_change_pct': float(projected_change_pct),
-            'model_stack': get_active_model_stack()
+            'model_stack': [
+                'Random Forest',
+                'Gradient Boosting',
+                'Extra Trees',
+                'HistGradientBoosting',
+                'XGBoost (if available)',
+                'LightGBM (if available)'
+            ]
         }
     except Exception as e:
         print(f"Error in interval trade signal: {str(e)}")

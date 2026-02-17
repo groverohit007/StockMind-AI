@@ -120,12 +120,15 @@ if SUBSCRIPTIONS_ENABLED and st.session_state.get('show_login_transition', False
 
 # Premium upgrade popup (shown after premium user login)
 if SUBSCRIPTIONS_ENABLED and st.session_state.get('show_premium_popup', False):
-    active_models = logic.get_active_model_stack()
-    model_lines = "\n".join([f"• {m}" for m in active_models])
     st.success("🎉 Congratulations! You have been upgraded to Premium.")
     st.info(
         "**Premium AI engine activated (75%–85% target accuracy):**\n"
-        f"{model_lines}\n"
+        "• Random Forest\n"
+        "• Gradient Boosting\n"
+        "• Extra Trees\n"
+        "• HistGradientBoosting\n"
+        "• XGBoost (if available)\n"
+        "• LightGBM (if available)\n"
         "• AI-enhanced multi-timeframe signal layer"
     )
     st.balloons()
@@ -774,30 +777,13 @@ with tabs[2]:
                     m3.metric("Projected Move", f"{bs_signal['projected_change_pct']:+.2f}%")
                     m4.metric("Model Confidence", f"{bs_signal['confidence']*100:.1f}%")
 
-                    m5, m6, m7 = st.columns(3)
-                    m5.metric("Meta Signal", bs_signal.get('meta_signal', bs_signal['signal']))
-                    m6.metric("Meta Score", f"{bs_signal.get('meta_score', 0.0)*100:.1f}%")
-                    m7.metric("Uncertainty", f"{bs_signal.get('uncertainty', 0.0)*100:.1f}%")
-
-                    if bs_signal.get('regime'):
-                        st.caption(f"Detected regime: {bs_signal['regime']}")
-
                     st.caption(
                         f"Estimated model accuracy band for this signal: {bs_signal['accuracy']*100:.1f}%"
                     )
                     st.write("**AI models used:** " + ", ".join(bs_signal['model_stack']))
 
             if auto_refresh:
-                last_refreshed = st.session_state.get('buy_sell_last_refreshed')
-                if last_refreshed:
-                    st.caption(
-                        f"Auto update enabled • Last refreshed: {last_refreshed.strftime('%Y-%m-%d %H:%M:%S')}"
-                    )
-                else:
-                    st.caption("Auto update enabled • Last refreshed: just now")
-
-                st.caption(f"Refreshing every {refresh_seconds} seconds...")
-                st.session_state['buy_sell_last_refreshed'] = datetime.now()
+                st.caption(f"Auto update enabled. Refreshing every {refresh_seconds} seconds...")
                 time.sleep(refresh_seconds)
                 st.rerun()
 
