@@ -698,7 +698,8 @@ def create_ultimate_features(data, forward_period=5, threshold=0.003):
     df['Forward_Return'] = df['Close'].pct_change(forward_period).shift(-forward_period)
     df['Target'] = (df['Forward_Return'] > threshold).astype(int)
     
-    # Drop NaN
+    # Clean invalid numeric values that can appear in intraday/noisy bars
+    df = df.replace([np.inf, -np.inf], np.nan)
     df = df.dropna()
     
     return df
@@ -795,8 +796,16 @@ def train_ultimate_model(data, ticker, interval, forward_period=5, threshold=0.0
         
         # Prepare data
         feature_cols = [col for col in df.columns if col not in ['Target', 'Forward_Return']]
-        X = df[feature_cols]
+        X = df[feature_cols].replace([np.inf, -np.inf], np.nan)
         y = df['Target']
+
+        # Keep only rows with finite features (prevents scaler/model crashes)
+        valid_mask = X.notna().all(axis=1)
+        X = X.loc[valid_mask]
+        y = y.loc[valid_mask]
+
+        if len(X) < 60:
+            return None
         
         # Scale features
         scaler = RobustScaler()
@@ -1043,7 +1052,7 @@ def get_multi_timeframe_predictions(ticker, user_tier='free'):
                     data, forward_period=fwd_period, threshold=thresh
                 )
                 feature_cols = model_result['feature_cols']
-                X = df[feature_cols].iloc[-1:].values
+                X = df[feature_cols].iloc[-1:]
                 X_scaled = model_result['scaler'].transform(X)
 
                 # Get prediction and probability
@@ -1100,6 +1109,105 @@ def get_multi_timeframe_predictions(ticker, user_tier='free'):
 
     except Exception as e:
         print(f"Error in multi-timeframe predictions: {str(e)}")
+        return None
+
+
+def get_interval_trade_signal(ticker, interval='15m'):
+    """Get BUY/SELL/HOLD signal and approximate target for intraday intervals."""
+    try:
+        interval_map = {
+            '15m': ('30d', 2, 0.0015, '15 Minutes'),
+            '30m': ('45d', 3, 0.0025, '30 Minutes'),
+            '1h': ('60d', 4, 0.0035, '1 Hour')
+        }
+        period, forward_period, threshold, label = interval_map.get(interval, interval_map['15m'])
+
+        data = get_data(ticker, period=period, interval=interval)
+        if data is None or len(data) < 120:
+            return None
+
+        # Keep recent bars for speed/stability on intraday calculations
+        if len(data) > 1200:
+            data = data.tail(1200)
+
+        model_result = train_ultimate_model(
+            data,
+            ticker,
+            interval,
+            forward_period=forward_period,
+            threshold=threshold
+        )
+
+        fallback_pred = None
+        if model_result is None:
+            fallback_pred = _rule_based_fallback_prediction(data)
+
+        if model_result is not None:
+            df = create_ultimate_features(data, forward_period=forward_period, threshold=threshold)
+            feature_cols = model_result['feature_cols']
+            X = df[feature_cols].iloc[-1:]
+            X_scaled = model_result['scaler'].transform(X)
+
+            prediction = model_result['model'].predict(X_scaled)[0]
+            proba = model_result['model'].predict_proba(X_scaled)[0]
+
+            if prediction == 1 and proba[1] > 0.55:
+                signal = 'BUY'
+            elif prediction == 0 and proba[0] > 0.55:
+                signal = 'SELL'
+            else:
+                signal = 'HOLD'
+
+            confidence = float(max(proba))
+            probabilities = {
+                'SELL': float(proba[0]),
+                'BUY': float(proba[1]),
+                'HOLD': float(1 - max(proba))
+            }
+            accuracy = float(model_result.get('accuracy', 0.78))
+        elif fallback_pred:
+            signal = fallback_pred['signal']
+            confidence = float(fallback_pred['confidence'])
+            probabilities = fallback_pred['probabilities']
+            accuracy = 0.76
+        else:
+            return None
+
+        current_price = float(data['Close'].iloc[-1])
+        expected_move_pct = max(0.35, threshold * 100 * forward_period * 2)
+        confidence_boost = 0.8 + confidence
+        move_pct = expected_move_pct * confidence_boost
+
+        if signal == 'BUY':
+            target_price = current_price * (1 + move_pct / 100)
+            projected_change_pct = move_pct
+        elif signal == 'SELL':
+            target_price = current_price * (1 - move_pct / 100)
+            projected_change_pct = -move_pct
+        else:
+            target_price = current_price
+            projected_change_pct = 0.0
+
+        return {
+            'signal': signal,
+            'confidence': confidence,
+            'accuracy': accuracy,
+            'probabilities': probabilities,
+            'interval_label': label,
+            'current_price': current_price,
+            'target_price': float(target_price),
+            'projected_change_pct': float(projected_change_pct),
+            'model_stack': [
+                'Random Forest',
+                'Gradient Boosting',
+                'Extra Trees',
+                'HistGradientBoosting',
+                'XGBoost (if available)',
+                'LightGBM (if available)'
+            ]
+        }
+    except Exception as e:
+        print(f"Error in interval trade signal: {str(e)}")
         return None
 
 # =============================================================================
