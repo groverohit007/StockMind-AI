@@ -903,6 +903,53 @@ with tabs[5]:
                 )
             else:
                 st.info("No user emails available yet")
+
+        with st.expander("💳 Manual subscription assignment", expanded=True):
+            st.caption("Use this when Stripe webhook/payment sync is delayed and you need to manually update a user.")
+
+            all_users = db.get_all_users()
+            non_admin_users = [u for u in all_users if not u.get('is_admin')]
+
+            if not non_admin_users:
+                st.info("No non-admin users available.")
+            else:
+                user_options = {
+                    f"{u['email']} ({u['tier']}/{u['status']})": u
+                    for u in non_admin_users
+                }
+
+                with st.form("manual_subscription_form"):
+                    selected_label = st.selectbox(
+                        "Select user",
+                        list(user_options.keys()),
+                        help="Choose the user account you want to update"
+                    )
+                    selected_action = st.selectbox(
+                        "Subscription action",
+                        ["Grant Premium", "Set Free"],
+                        help="Grant Premium = premium/active, Set Free = free/active"
+                    )
+                    save_subscription = st.form_submit_button("Update subscription")
+
+                if save_subscription:
+                    selected_user = user_options[selected_label]
+                    target_tier = 'premium' if selected_action == "Grant Premium" else 'free'
+                    user_info = db.get_user_info(selected_user['id']) or {}
+                    success = db.update_subscription(
+                        selected_user['id'],
+                        tier=target_tier,
+                        status='active',
+                        stripe_customer_id=user_info.get('stripe_customer_id'),
+                        stripe_subscription_id=None
+                    )
+
+                    if success:
+                        st.success(
+                            f"✅ Updated {selected_user['email']} to {target_tier.title()} ({'active'})"
+                        )
+                        st.rerun()
+                    else:
+                        st.error("❌ Failed to update subscription")
     elif SUBSCRIPTIONS_ENABLED:
         st.info("Admin Control Center is only available for master admin users.")
     else:
