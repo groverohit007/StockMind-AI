@@ -59,6 +59,27 @@ try:
 except:
     HAS_VADER = False
 
+# ============================================================================
+# YFINANCE SESSION SETUP (Fix for Streamlit Cloud)
+# ============================================================================
+# Yahoo Finance blocks requests without proper headers. Using a custom session
+# with a realistic User-Agent fixes this on Streamlit Cloud.
+
+_yf_session = requests.Session()
+_yf_session.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5',
+})
+
+# Fix yfinance timezone cache for Streamlit Cloud (read-only filesystem)
+try:
+    _cache_dir = os.path.join("/tmp", "yfinance_cache")
+    os.makedirs(_cache_dir, exist_ok=True)
+    yf.set_tz_cache_location(_cache_dir)
+except Exception:
+    pass
+
 # Cache directory
 MODEL_CACHE_DIR = "model_cache"
 os.makedirs(MODEL_CACHE_DIR, exist_ok=True)
@@ -107,9 +128,9 @@ def _fetch_data_cached(ticker, period, interval):
     if interval in ['15m', '30m', '60m', '1h']:
         period = "60d"
 
-    # Method 1: Try yf.Ticker.history() - more reliable with API changes
+    # Method 1: Try yf.Ticker.history() with custom session
     try:
-        stock = yf.Ticker(ticker)
+        stock = yf.Ticker(ticker, session=_yf_session)
         data = stock.history(period=period, interval=interval)
         cleaned = _clean_dataframe(data)
         if cleaned is not None:
@@ -117,16 +138,26 @@ def _fetch_data_cached(ticker, period, interval):
     except Exception as e:
         print(f"Ticker.history() failed for {ticker}: {str(e)}")
 
-    # Method 2: Fallback to yf.download()
+    # Method 2: Fallback to yf.download() with custom session
     try:
-        data = yf.download(ticker, period=period, interval=interval, progress=False)
+        data = yf.download(ticker, period=period, interval=interval,
+                           progress=False, session=_yf_session)
         cleaned = _clean_dataframe(data)
         if cleaned is not None:
             return cleaned
     except Exception as e:
         print(f"yf.download() failed for {ticker}: {str(e)}")
 
-    # Both methods failed - raise so the result is NOT cached
+    # Method 3: Retry without custom session (in case session is stale)
+    try:
+        data = yf.download(ticker, period=period, interval=interval, progress=False)
+        cleaned = _clean_dataframe(data)
+        if cleaned is not None:
+            return cleaned
+    except Exception as e:
+        print(f"yf.download() fallback failed for {ticker}: {str(e)}")
+
+    # All methods failed - raise so the result is NOT cached
     raise ValueError(f"Unable to fetch data for {ticker}")
 
 
@@ -241,18 +272,15 @@ def get_macro_data():
         
         results = {}
         
-        for name, ticker in macro_tickers.items():
+        for name, tkr in macro_tickers.items():
             try:
-                data = yf.download(ticker, period="5d", progress=False)
-                if not data.empty:
-                    # Handle multi-index if present
-                    if isinstance(data.columns, pd.MultiIndex):
-                        data.columns = data.columns.get_level_values(0)
-                    
+                stock = yf.Ticker(tkr, session=_yf_session)
+                data = stock.history(period="5d")
+                if data is not None and not data.empty:
                     latest = data['Close'].iloc[-1]
                     prev = data['Close'].iloc[-2] if len(data) > 1 else latest
                     change = ((latest - prev) / prev) * 100
-                    
+
                     results[name] = {
                         'Price': float(latest),
                         'Change': float(change)
@@ -287,14 +315,11 @@ def get_sector_heatmap():
         
         results = {}
         
-        for sector, ticker in sector_etfs.items():
+        for sector, tkr in sector_etfs.items():
             try:
-                data = yf.download(ticker, period="5d", progress=False)
-                if not data.empty:
-                    # Handle multi-index
-                    if isinstance(data.columns, pd.MultiIndex):
-                        data.columns = data.columns.get_level_values(0)
-                    
+                stock = yf.Ticker(tkr, session=_yf_session)
+                data = stock.history(period="5d")
+                if data is not None and not data.empty:
                     latest = data['Close'].iloc[-1]
                     prev = data['Close'].iloc[-2] if len(data) > 1 else latest
                     change = ((latest - prev) / prev) * 100
@@ -311,7 +336,7 @@ def get_sector_heatmap():
 def get_fundamentals(ticker):
     """Get fundamental data for a stock."""
     try:
-        stock = yf.Ticker(ticker)
+        stock = yf.Ticker(ticker, session=_yf_session)
         info = stock.info
         
         fundamentals = {
@@ -678,7 +703,7 @@ def get_sentiment_score(ticker):
 def get_fundamental_score(ticker):
     """Get fundamental analysis score."""
     try:
-        stock = yf.Ticker(ticker)
+        stock = yf.Ticker(ticker, session=_yf_session)
         info = stock.info
         
         score = 50  # Neutral base
