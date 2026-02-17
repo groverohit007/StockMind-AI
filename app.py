@@ -991,10 +991,10 @@ if SUBSCRIPTIONS_ENABLED:
                     st.markdown("---")
                     st.link_button(
                         "💎 Subscribe Now",
-                        "https://buy.stripe.com/test_XXXXXX",  # Replace with actual Stripe link
+                        "https://buy.stripe.com/4gM7sM8MWcCEb7r2WQ7AI00",  # Replace with actual Stripe link
                         use_container_width=True
                     )
-                    st.caption("💳 Test card: 4242 4242 4242 4242")
+                    st.caption("💳 Transaction Protector embedded")
                     st.caption("🔒 Secure SSL encryption")
                 else:
                     st.warning("⚠️ Payment system not configured")
