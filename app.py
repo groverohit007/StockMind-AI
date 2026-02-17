@@ -242,10 +242,16 @@ with tabs[0]:
                 st.warning("If Alpha Vantage shows a rate-limit note, wait 60 seconds and try again. Free plans are throttled.")
             st.stop()
         
+        # Determine user tier for model selection
+        if SUBSCRIPTIONS_ENABLED:
+            user_tier = 'premium' if (auth.is_admin() or auth.is_premium()) else 'free'
+        else:
+            user_tier = 'free'
+
         # Make AI Predictions
         with st.spinner("🤖 Training Multi-Timeframe AI Models..."):
             try:
-                result = logic.get_multi_timeframe_predictions(ticker)
+                result = logic.get_multi_timeframe_predictions(ticker, user_tier=user_tier)
                 
                 # Record usage (if subscriptions enabled)
                 if SUBSCRIPTIONS_ENABLED and result and 'predictions' in result:
@@ -527,8 +533,13 @@ with tabs[1]:
     st.markdown("*Scan your watchlist for trading opportunities*")
     
     if st.button("🔄 Scan Watchlist", type="primary"):
+        if SUBSCRIPTIONS_ENABLED:
+            scan_tier = 'premium' if (auth.is_admin() or auth.is_premium()) else 'free'
+        else:
+            scan_tier = 'free'
+
         watchlist = logic.get_watchlist()
-        
+
         if not watchlist:
             st.warning("⚠️ Watchlist is empty. Add stocks in the Terminal tab.")
         else:
@@ -543,7 +554,7 @@ with tabs[1]:
                     data = logic.get_data(ticker, period="6mo")
                     if data is not None and len(data) > 50:
                         # Get quick prediction
-                        result = logic.get_multi_timeframe_predictions(ticker)
+                        result = logic.get_multi_timeframe_predictions(ticker, user_tier=scan_tier)
                         
                         if result and 'predictions' in result and result['predictions']:
                             # Get daily prediction
@@ -766,7 +777,7 @@ with tabs[5]:
     st.markdown("---")
     st.subheader("👑 Admin Control Center")
 
-    if auth.is_admin():
+    if SUBSCRIPTIONS_ENABLED and auth.is_admin():
         st.success("Master admin mode enabled")
 
         with st.expander("🔐 Admin password", expanded=False):
@@ -787,19 +798,51 @@ with tabs[5]:
 
         with st.expander("🧩 API configuration", expanded=True):
             existing_settings = db.get_app_settings()
+
+            # Check which keys are already in secrets.toml
+            def _check_secret(section, key='api_key'):
+                try:
+                    return bool(st.secrets.get(section, {}).get(key, '').strip())
+                except Exception:
+                    return False
+
+            alpha_in_secrets = _check_secret('alpha_vantage')
+            news_in_secrets = _check_secret('news')
+            openai_in_secrets = _check_secret('openai')
+
             with st.form("admin_api_settings_form"):
-                alpha_vantage_key = st.text_input("Alpha Vantage API Key", value=existing_settings.get("alpha_vantage_api_key", ""), type="password")
-                news_api_key = st.text_input("News API Key", value=existing_settings.get("news_api_key", ""), type="password")
-                openai_api_key = st.text_input("OpenAI API Key", value=existing_settings.get("openai_api_key", ""), type="password")
+                if alpha_in_secrets:
+                    st.info("**Alpha Vantage API Key:** Already in secrets.toml")
+                    alpha_vantage_key = None
+                else:
+                    alpha_vantage_key = st.text_input("Alpha Vantage API Key", value=existing_settings.get("alpha_vantage_api_key", ""), type="password")
+
+                if news_in_secrets:
+                    st.info("**News API Key:** Already in secrets.toml")
+                    news_api_key = None
+                else:
+                    news_api_key = st.text_input("News API Key", value=existing_settings.get("news_api_key", ""), type="password")
+
+                if openai_in_secrets:
+                    st.info("**OpenAI API Key:** Already in secrets.toml")
+                    openai_api_key = None
+                else:
+                    openai_api_key = st.text_input("OpenAI API Key", value=existing_settings.get("openai_api_key", ""), type="password")
+
                 save_apis = st.form_submit_button("Save API settings")
 
                 if save_apis:
-                    ok = all([
-                        db.set_app_setting("alpha_vantage_api_key", alpha_vantage_key.strip()),
-                        db.set_app_setting("news_api_key", news_api_key.strip()),
-                        db.set_app_setting("openai_api_key", openai_api_key.strip())
-                    ])
-                    if ok:
+                    save_results = []
+                    if alpha_vantage_key is not None:
+                        save_results.append(db.set_app_setting("alpha_vantage_api_key", alpha_vantage_key.strip()))
+                    if news_api_key is not None:
+                        save_results.append(db.set_app_setting("news_api_key", news_api_key.strip()))
+                    if openai_api_key is not None:
+                        save_results.append(db.set_app_setting("openai_api_key", openai_api_key.strip()))
+
+                    if not save_results:
+                        st.info("All API keys are managed via secrets.toml")
+                    elif all(save_results):
                         st.success("✅ API settings saved")
                     else:
                         st.error("❌ Failed saving one or more API settings")
@@ -818,8 +861,10 @@ with tabs[5]:
                 )
             else:
                 st.info("No user emails available yet")
-    else:
+    elif SUBSCRIPTIONS_ENABLED:
         st.info("Admin Control Center is only available for master admin users.")
+    else:
+        st.info("Admin Control Center requires the subscription system to be enabled.")
     st.markdown("---")
     st.subheader("ℹ️ About")
     st.write("**StockMind-AI Pro v2.0**")

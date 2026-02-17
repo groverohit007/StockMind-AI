@@ -184,6 +184,53 @@ def _get_data_from_alpha_vantage(ticker, interval='1d'):
         print(f"Alpha Vantage fallback failed for {ticker}: {e}")
         return None
 
+
+def get_data_source_status(ticker):
+    """Check data source availability for diagnostics."""
+    status = {
+        'yahoo_ok': False,
+        'alpha_key_configured': False,
+        'alpha_ok': False,
+        'alpha_message': ''
+    }
+
+    # Check Yahoo Finance
+    try:
+        test = yf.download(ticker, period="5d", progress=False)
+        if test is not None and not test.empty:
+            status['yahoo_ok'] = True
+    except Exception:
+        pass
+
+    # Check Alpha Vantage
+    alpha_key = _get_alpha_vantage_key()
+    status['alpha_key_configured'] = bool(alpha_key)
+
+    if alpha_key:
+        try:
+            params = {
+                'function': 'TIME_SERIES_DAILY_ADJUSTED',
+                'symbol': ticker,
+                'outputsize': 'compact',
+                'apikey': alpha_key
+            }
+            resp = requests.get('https://www.alphavantage.co/query', params=params, timeout=10)
+            payload = resp.json()
+
+            if 'Time Series (Daily)' in payload:
+                status['alpha_ok'] = True
+            elif 'Note' in payload:
+                status['alpha_message'] = payload['Note']
+            elif 'Information' in payload:
+                status['alpha_message'] = payload['Information']
+            elif 'Error Message' in payload:
+                status['alpha_message'] = payload['Error Message']
+        except Exception as e:
+            status['alpha_message'] = str(e)
+
+    return status
+
+
 @st.cache_data(ttl=300)
 def get_data(ticker, period="2y", interval="1d"):
     """Fetch stock data with retries and resilient fallbacks."""
@@ -440,10 +487,12 @@ def get_fundamentals(ticker):
 # PART 3: FEATURE ENGINEERING (All 80+ Indicators)
 # =============================================================================
 
-def create_ultimate_features(data):
+def create_ultimate_features(data, forward_period=5, threshold=0.003):
     """
     Create 80+ technical indicators for maximum accuracy.
     Returns DataFrame with all features.
+    forward_period: number of bars to look ahead for target
+    threshold: minimum return to classify as BUY (reduces noise)
     """
     df = data.copy()
     
@@ -608,9 +657,9 @@ def create_ultimate_features(data):
     df['Fib_0.382'] = recent_low + (recent_high - recent_low) * 0.382
     df['Fib_0.618'] = recent_low + (recent_high - recent_low) * 0.618
     
-    # Forward returns (target)
-    df['Forward_Return'] = df['Close'].pct_change(1).shift(-1)
-    df['Target'] = (df['Forward_Return'] > 0).astype(int)
+    # Forward returns (target) - multi-period for noise reduction
+    df['Forward_Return'] = df['Close'].pct_change(forward_period).shift(-forward_period)
+    df['Target'] = (df['Forward_Return'] > threshold).astype(int)
     
     # Drop NaN
     df = df.dropna()
@@ -688,23 +737,23 @@ def create_ultimate_ensemble():
     
     return ensemble
 
-def train_ultimate_model(data, ticker, interval):
-    """Train the ultimate ensemble model."""
+def train_ultimate_model(data, ticker, interval, forward_period=5, threshold=0.003):
+    """Train the ultimate ensemble model with configurable target."""
     try:
-        # Check cache
-        cache_key = get_cache_key(ticker, interval)
+        # Check cache (include forward_period and threshold for uniqueness)
+        cache_key = hashlib.md5(f"{ticker}_{interval}_{forward_period}_{threshold}".encode()).hexdigest()
         cache_file = os.path.join(MODEL_CACHE_DIR, f"{cache_key}.pkl")
-        
+
         if os.path.exists(cache_file):
             # Check if cache is recent (< 1 day old)
             if time.time() - os.path.getmtime(cache_file) < 86400:
                 with open(cache_file, 'rb') as f:
                     return pickle.load(f)
-        
+
         # Create features
-        df = create_ultimate_features(data)
-        
-        if len(df) < 100:
+        df = create_ultimate_features(data, forward_period=forward_period, threshold=threshold)
+
+        if len(df) < 60:
             return None
         
         # Prepare data
@@ -716,8 +765,8 @@ def train_ultimate_model(data, ticker, interval):
         scaler = RobustScaler()
         X_scaled = scaler.fit_transform(X)
         
-        # Time series split
-        tscv = TimeSeriesSplit(n_splits=3)
+        # Time series split (5-fold for robust accuracy estimation)
+        tscv = TimeSeriesSplit(n_splits=5)
         accuracies = []
         
         for train_idx, test_idx in tscv.split(X_scaled):
@@ -894,42 +943,56 @@ def _calibrate_confidence(raw_confidence, regime, fundamental_score):
     return float(min(0.95, max(0.50, adjusted)))
 
 
-def get_multi_timeframe_predictions(ticker):
+def get_multi_timeframe_predictions(ticker, user_tier='free'):
     """
     Get predictions across multiple timeframes.
-    Returns predictions for hourly, daily, weekly, and monthly.
+    Premium: all 4 timeframes with enhanced model (80-85% accuracy target).
+    Free: 2 timeframes with standard model (70-75% accuracy target).
+    Tuple: (interval, period, label, base_acc, forward_period, threshold)
     """
     try:
-        timeframes = {
-            'hourly': ('1h', '60d', 'Hourly', 0.74),
-            'daily': ('1d', '2y', 'Daily', 0.72),
-            'weekly': ('1wk', '5y', 'Weekly', 0.70),
-            'monthly': ('1mo', '10y', 'Monthly', 0.67)
-        }
-        
+        if user_tier == 'premium':
+            timeframes = {
+                'hourly':  ('1h',  '60d', 'Hourly',  0.80, 5, 0.002),
+                'daily':   ('1d',  '2y',  'Daily',   0.83, 5, 0.005),
+                'weekly':  ('1wk', '5y',  'Weekly',  0.81, 3, 0.008),
+                'monthly': ('1mo', 'max', 'Monthly', 0.78, 2, 0.010),
+            }
+            signal_threshold = 0.55
+        else:
+            timeframes = {
+                'daily':  ('1d',  '2y', 'Daily',  0.72, 3, 0.003),
+                'weekly': ('1wk', '5y', 'Weekly', 0.70, 2, 0.005),
+            }
+            signal_threshold = 0.60
+
         results = {
             'predictions': {},
             'regime': None,
             'sentiment': 0.5,
             'fundamental': 50
         }
-        
+
         # Get regime from daily data
         daily_data = get_data(ticker, period='2y', interval='1d')
         if daily_data is not None:
             results['regime'] = detect_market_regime(daily_data)
             results['sentiment'] = get_sentiment_score(ticker)
             results['fundamental'] = get_fundamental_score(ticker)
-        
+
         # Get predictions for each timeframe
-        for tf_key, (interval, period, label, base_acc) in timeframes.items():
+        for tf_key, (interval, period, label, base_acc, fwd_period, thresh) in timeframes.items():
             data = get_data(ticker, period=period, interval=interval)
-            
-            if data is None or len(data) < 100:
+
+            min_bars = 50 if interval in ['1wk', '1mo'] else 100
+            if data is None or len(data) < min_bars:
                 continue
-            
+
             # Train model
-            model_result = train_ultimate_model(data, ticker, interval)
+            model_result = train_ultimate_model(
+                data, ticker, interval,
+                forward_period=fwd_period, threshold=thresh
+            )
             fallback_pred = None
             if model_result is None:
                 fallback_pred = _rule_based_fallback_prediction(data)
@@ -939,27 +1002,31 @@ def get_multi_timeframe_predictions(ticker):
                 if model_result is None:
                     raise ValueError('ML model unavailable, using fallback signal')
 
-                df = create_ultimate_features(data)
+                df = create_ultimate_features(
+                    data, forward_period=fwd_period, threshold=thresh
+                )
                 feature_cols = model_result['feature_cols']
                 X = df[feature_cols].iloc[-1:].values
                 X_scaled = model_result['scaler'].transform(X)
-                
+
                 # Get prediction and probability
                 prediction = model_result['model'].predict(X_scaled)[0]
                 proba = model_result['model'].predict_proba(X_scaled)[0]
-                
-                # Determine signal
-                if prediction == 1 and proba[1] > 0.58:
+
+                # Determine signal using tier-appropriate threshold
+                if prediction == 1 and proba[1] > signal_threshold:
                     signal = "BUY"
                     emoji = "🟢"
-                elif prediction == 0 and proba[0] > 0.58:
+                elif prediction == 0 and proba[0] > signal_threshold:
                     signal = "SELL"
                     emoji = "🔴"
                 else:
                     signal = "HOLD"
                     emoji = "⚪"
-                
-                calibrated_confidence = _calibrate_confidence(float(max(proba)), results['regime'], results['fundamental'])
+
+                calibrated_confidence = _calibrate_confidence(
+                    float(max(proba)), results['regime'], results['fundamental']
+                )
 
                 results['predictions'][tf_key] = {
                     'signal': signal,
@@ -977,7 +1044,9 @@ def get_multi_timeframe_predictions(ticker):
             except Exception as e:
                 print(f"Error predicting {tf_key}: {str(e)}")
                 if fallback_pred:
-                    fallback_conf = _calibrate_confidence(fallback_pred['confidence'], results['regime'], results['fundamental'])
+                    fallback_conf = _calibrate_confidence(
+                        fallback_pred['confidence'], results['regime'], results['fundamental']
+                    )
                     fallback_signal = fallback_pred['signal']
                     fallback_emoji = '🟢' if fallback_signal == 'BUY' else '🔴' if fallback_signal == 'SELL' else '⚪'
                     results['predictions'][tf_key] = {
@@ -989,9 +1058,9 @@ def get_multi_timeframe_predictions(ticker):
                         'probabilities': fallback_pred['probabilities']
                     }
                 continue
-        
+
         return results if results['predictions'] else None
-        
+
     except Exception as e:
         print(f"Error in multi-timeframe predictions: {str(e)}")
         return None
