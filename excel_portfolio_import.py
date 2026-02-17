@@ -1,9 +1,12 @@
 # Excel Portfolio Import Enhancement for logic.py
-# Add these functions to your existing logic.py file
+# These functions extend logic.py with Excel import capabilities
 
 import pandas as pd
 import openpyxl
 from typing import Optional, Dict, List
+from logic import get_data, get_portfolio, search_ticker
+
+PORTFOLIO_FILE = "portfolio.csv"
 
 def read_excel_portfolio(file) -> Optional[pd.DataFrame]:
     """

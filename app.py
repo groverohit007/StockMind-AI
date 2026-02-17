@@ -225,8 +225,12 @@ with tabs[0]:
             st.error(f"❌ Unable to fetch data for **{ticker}**")
             st.info("💡 **Possible reasons:**")
             st.write("• Ticker symbol may be incorrect")
-            st.write("• Market might be closed")
+            st.write("• Market might be closed or data temporarily unavailable")
             st.write("• Try: MSFT, GOOGL, TSLA, NVDA")
+            st.write("• Check your internet connection")
+            if st.button("🔄 Retry"):
+                st.cache_data.clear()
+                st.rerun()
             st.stop()
         
         # Make AI Predictions
@@ -293,11 +297,15 @@ with tabs[0]:
                     
                     for idx, (timeframe, pred_data) in enumerate(predictions.items()):
                         with pred_cols[idx]:
-                            signal = pred_data['signal']
-                            confidence = pred_data['confidence'] * 100
-                            emoji = pred_data['emoji']
-                            label = pred_data['timeframe']
+                            signal = pred_data.get('signal', 'HOLD')
+                            confidence = pred_data.get('confidence', 0) * 100
+                            emoji = pred_data.get('emoji', '⚪')
+                            label = pred_data.get('timeframe', timeframe.title())
                             accuracy = pred_data.get('accuracy', 0) * 100
+
+                            # Derive emoji from signal if not present
+                            if 'emoji' not in pred_data:
+                                emoji = '🟢' if signal == 'BUY' else '🔴' if signal == 'SELL' else '⚪'
                             
                             # Color based on signal
                             if signal == 'BUY':

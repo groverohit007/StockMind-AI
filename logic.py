@@ -5,7 +5,6 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import pdfplumber
 import re
 import time
 import requests
@@ -14,7 +13,6 @@ import pickle
 import hashlib
 import streamlit as st
 from datetime import datetime, timedelta
-from scipy.optimize import minimize 
 from ta.momentum import RSIIndicator, StochasticOscillator, WilliamsRIndicator, ROCIndicator
 from ta.trend import SMAIndicator, EMAIndicator, MACD, ADXIndicator, CCIIndicator, AroonIndicator
 from ta.volatility import AverageTrueRange, BollingerBands, KeltnerChannel, DonchianChannel
@@ -73,38 +71,73 @@ def get_cache_key(ticker, interval):
     """Generate cache key for models."""
     return hashlib.md5(f"{ticker}_{interval}".encode()).hexdigest()
 
+def _clean_dataframe(data):
+    """Clean and standardize a stock DataFrame."""
+    if data is None or data.empty:
+        return None
+
+    # Fix multi-index columns (common in newer yfinance versions)
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
+
+    # Remove duplicate columns if any
+    data = data.loc[:, ~data.columns.duplicated()]
+
+    # Ensure required columns exist
+    required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+    if not all(col in data.columns for col in required_cols):
+        return None
+
+    # Keep only required columns to avoid issues
+    data = data[required_cols].copy()
+
+    # Remove any NaN rows
+    data = data.dropna()
+
+    return data if len(data) >= 50 else None
+
+
 @st.cache_data(ttl=300)
+def _fetch_data_cached(ticker, period, interval):
+    """
+    Internal fetch function that raises on failure so errors are NOT cached.
+    Successful results are cached for 300 seconds.
+    """
+    # Adjust period for intraday data
+    if interval in ['15m', '30m', '60m', '1h']:
+        period = "60d"
+
+    # Method 1: Try yf.Ticker.history() - more reliable with API changes
+    try:
+        stock = yf.Ticker(ticker)
+        data = stock.history(period=period, interval=interval)
+        cleaned = _clean_dataframe(data)
+        if cleaned is not None:
+            return cleaned
+    except Exception as e:
+        print(f"Ticker.history() failed for {ticker}: {str(e)}")
+
+    # Method 2: Fallback to yf.download()
+    try:
+        data = yf.download(ticker, period=period, interval=interval, progress=False)
+        cleaned = _clean_dataframe(data)
+        if cleaned is not None:
+            return cleaned
+    except Exception as e:
+        print(f"yf.download() failed for {ticker}: {str(e)}")
+
+    # Both methods failed - raise so the result is NOT cached
+    raise ValueError(f"Unable to fetch data for {ticker}")
+
+
 def get_data(ticker, period="2y", interval="1d"):
     """
-    Fetch stock data with better error handling.
-    FIXED: Now handles errors properly and returns None when data unavailable.
+    Fetch stock data with robust error handling and caching.
+    Returns None on failure (but failures are NOT cached).
     """
     try:
-        # Adjust period for intraday data
-        if interval in ['15m', '30m', '60m', '1h']: 
-            period = "60d"  # More data for better predictions
-        
-        # Download data
-        data = yf.download(ticker, period=period, interval=interval, progress=False)
-        
-        if data.empty:
-            return None
-        
-        # Fix multi-index columns
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.get_level_values(0)
-        
-        # Ensure required columns
-        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
-        if not all(col in data.columns for col in required_cols):
-            return None
-        
-        # Remove any NaN rows
-        data = data.dropna()
-        
-        return data if len(data) >= 50 else None
-        
-    except Exception as e:
+        return _fetch_data_cached(ticker, period, interval)
+    except (ValueError, Exception) as e:
         print(f"Error fetching data for {ticker}: {str(e)}")
         return None
 

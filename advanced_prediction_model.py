@@ -1,8 +1,9 @@
 # Advanced Multi-Timeframe Stock Prediction System
-# Add these enhanced functions to your logic.py
+# Enhanced functions that extend logic.py
 
 import pandas as pd
 import numpy as np
+from logic import get_data
 from sklearn.ensemble import (
     RandomForestClassifier, 
     GradientBoostingClassifier,
@@ -71,7 +72,7 @@ def create_advanced_features(df, timeframe='1d'):
     df['CCI'] = CCIIndicator(high, low, close, window=20).cci()
     
     # Aroon Indicator
-    aroon = AroonIndicator(close, window=25)
+    aroon = AroonIndicator(high, low, window=25)
     df['Aroon_Up'] = aroon.aroon_up()
     df['Aroon_Down'] = aroon.aroon_down()
     df['Aroon_Indicator'] = aroon.aroon_indicator()
@@ -224,7 +225,7 @@ def create_advanced_features(df, timeframe='1d'):
     df['Volume_Surge'] = (df['Volume_Ratio'] > 2).astype(int)
     
     # Fill NaN with forward/backward fill
-    df = df.fillna(method='ffill').fillna(method='bfill')
+    df = df.ffill().bfill()
     
     # Drop any remaining NaN
     df = df.dropna()
@@ -358,7 +359,7 @@ class MultiTimeframePredictionEngine:
         
         # Handle infinite values
         X = X.replace([np.inf, -np.inf], np.nan)
-        X = X.fillna(method='ffill').fillna(method='bfill').fillna(0)
+        X = X.ffill().bfill().fillna(0)
         
         # Train/Test Split (80/20, time-series aware)
         split_idx = int(len(X) * 0.8)
