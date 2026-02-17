@@ -16,9 +16,8 @@ try:
     # Initialize authentication
     auth.init_session_state()
     
-    # Initialize database if it doesn't exist
-    if not os.path.exists('stockmind.db'):
-        db.init_database()
+    # Initialize / migrate database and ensure master admin user
+    db.init_database()
     
     # Check if user is logged in
     if not auth.is_logged_in():
@@ -103,7 +102,10 @@ with st.sidebar:
         
         st.write(f"**Email:** {user_email[:20]}...")
         
-        if user_tier == 'premium':
+        if auth.is_admin():
+            st.success("👑 **Master Admin**")
+            st.write("**Full platform access**")
+        elif user_tier == 'premium':
             st.success("✅ **Premium Member**")
             st.write("**Unlimited Predictions**")
         else:
@@ -221,12 +223,40 @@ with tabs[0]:
             data = logic.get_data(ticker, period="2y")
         
         # Error Handling
-        if data is None or len(data) < 50:
+        if data is None or len(data) < 35:
             st.error(f"❌ Unable to fetch data for **{ticker}**")
             st.info("💡 **Possible reasons:**")
             st.write("• Ticker symbol may be incorrect")
             st.write("• Market might be closed")
             st.write("• Try: MSFT, GOOGL, TSLA, NVDA")
+
+            with st.expander("🛠️ Data source diagnostics", expanded=False):
+                default_status = {
+                    'yahoo_ok': False,
+                    'alpha_key_configured': False,
+                    'alpha_ok': False,
+                    'alpha_message': ''
+                }
+
+                try:
+                    diagnostics_fn = getattr(logic, 'get_data_source_status', None)
+                    if callable(diagnostics_fn):
+                        status = diagnostics_fn(ticker)
+                    else:
+                        status = default_status
+                        st.caption("Diagnostics helper not available in current deployment build.")
+                except Exception as diag_err:
+                    status = default_status
+                    st.caption(f"Diagnostics temporarily unavailable: {diag_err}")
+
+                st.write(f"**Yahoo Finance reachable:** {'✅' if status.get('yahoo_ok') else '❌'}")
+                st.write(f"**Alpha Vantage key configured:** {'✅' if status.get('alpha_key_configured') else '❌'}")
+                if status.get('alpha_key_configured'):
+                    st.write(f"**Alpha Vantage data fetch:** {'✅' if status.get('alpha_ok') else '❌'}")
+                    if status.get('alpha_message'):
+                        st.caption(f"Alpha Vantage message: {status['alpha_message']}")
+
+                st.warning("If Alpha Vantage shows a rate-limit note, wait 60 seconds and try again. Free plans are throttled.")
             st.stop()
         
         # Make AI Predictions
@@ -749,6 +779,73 @@ with tabs[5]:
     st.subheader("📊 Display")
     theme = st.selectbox("Chart Theme", ["Dark", "Light"])
     
+
+    st.markdown("---")
+    st.subheader("👑 Admin Control Center")
+
+    if auth.is_admin():
+        st.success("Master admin mode enabled")
+
+        with st.expander("🔐 Admin password", expanded=False):
+            with st.form("admin_password_form"):
+                new_password = st.text_input("New password", type="password")
+                confirm_password = st.text_input("Confirm new password", type="password")
+                password_submit = st.form_submit_button("Update admin password")
+
+                if password_submit:
+                    if not new_password or len(new_password) < 6:
+                        st.error("Password must be at least 6 characters")
+                    elif new_password != confirm_password:
+                        st.error("Passwords do not match")
+                    elif db.update_user_password(auth.get_current_user_id(), new_password):
+                        st.success("✅ Admin password updated")
+                    else:
+                        st.error("❌ Failed to update password")
+
+        with st.expander("🧩 API configuration", expanded=True):
+            st.caption("Primary source is .streamlit/secrets.toml (env vars also supported). DB values are fallback only.")
+
+            # Show effective key status resolved from env/secrets/DB
+            key_status = logic.get_api_key_status()
+            st.write(f"Alpha Vantage: {'✅ Configured' if key_status['alpha_vantage'] else '❌ Missing'}")
+            st.write(f"News API: {'✅ Configured' if key_status['newsapi'] else '❌ Missing'}")
+            st.write(f"OpenAI API: {'✅ Configured' if key_status['openai'] else '❌ Missing'}")
+
+            existing_settings = db.get_app_settings()
+            with st.form("admin_api_settings_form"):
+                st.write("Optional fallback values (used only if secrets/env are missing):")
+                alpha_vantage_key = st.text_input("Alpha Vantage API Key (fallback)", value=existing_settings.get("alpha_vantage_api_key", ""), type="password")
+                news_api_key = st.text_input("News API Key (fallback)", value=existing_settings.get("news_api_key", ""), type="password")
+                openai_api_key = st.text_input("OpenAI API Key (fallback)", value=existing_settings.get("openai_api_key", ""), type="password")
+                save_apis = st.form_submit_button("Save fallback API settings")
+
+                if save_apis:
+                    ok = all([
+                        db.set_app_setting("alpha_vantage_api_key", alpha_vantage_key.strip()),
+                        db.set_app_setting("news_api_key", news_api_key.strip()),
+                        db.set_app_setting("openai_api_key", openai_api_key.strip())
+                    ])
+                    if ok:
+                        st.success("✅ Fallback API settings saved")
+                    else:
+                        st.error("❌ Failed saving one or more fallback settings")
+
+        with st.expander("📧 User emails (marketing list)", expanded=True):
+            emails = db.get_all_user_emails()
+            if emails:
+                email_df = pd.DataFrame({"email": emails})
+                st.dataframe(email_df, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Download emails CSV",
+                    email_df.to_csv(index=False),
+                    file_name=f"stockmind_user_emails_{datetime.now().date()}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+            else:
+                st.info("No user emails available yet")
+    else:
+        st.info("Admin Control Center is only available for master admin users.")
     st.markdown("---")
     st.subheader("ℹ️ About")
     st.write("**StockMind-AI Pro v2.0**")

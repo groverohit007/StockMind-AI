@@ -73,37 +73,273 @@ def get_cache_key(ticker, interval):
     """Generate cache key for models."""
     return hashlib.md5(f"{ticker}_{interval}".encode()).hexdigest()
 
+def _normalize_ohlcv_columns(data):
+    """Normalize OHLCV columns so downstream models remain stable."""
+    if data is None or data.empty:
+        return None
+
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
+
+    # Some sources return lowercase columns
+    rename_map = {c: c.capitalize() for c in data.columns}
+    data = data.rename(columns=rename_map)
+
+    required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+    if not all(col in data.columns for col in required_cols):
+        return None
+
+    return data[required_cols].dropna()
+
+
+
+
+
+
+def _get_secret_or_setting(secret_section, secret_key, setting_key, env_key=''):
+    """Resolve config value from env -> secrets.toml -> DB setting."""
+    if env_key:
+        env_val = os.getenv(env_key, '').strip()
+        if env_val:
+            return env_val
+
+    try:
+        val = st.secrets.get(secret_section, {}).get(secret_key, '').strip()
+        if val:
+            return val
+    except Exception:
+        pass
+
+    try:
+        import database as db
+        return db.get_app_settings().get(setting_key, '').strip()
+    except Exception:
+        return ''
+
+
+def get_news_api_key():
+    """Get NewsAPI key from secure configuration."""
+    return _get_secret_or_setting('newsapi', 'api_key', 'news_api_key', env_key='NEWS_API_KEY')
+
+
+def get_openai_api_key():
+    """Get OpenAI key from secure configuration."""
+    return _get_secret_or_setting('openai', 'api_key', 'openai_api_key', env_key='OPENAI_API_KEY')
+
+
+def get_api_key_status():
+    """Return availability status for configured API keys."""
+    return {
+        'alpha_vantage': bool(_get_alpha_vantage_key()),
+        'newsapi': bool(get_news_api_key()),
+        'openai': bool(get_openai_api_key()),
+    }
+
+def _get_alpha_vantage_key():
+    """Resolve Alpha Vantage key from env, secrets, or admin settings."""
+    return _get_secret_or_setting(
+        'alpha_vantage',
+        'api_key',
+        'alpha_vantage_api_key',
+        env_key='ALPHA_VANTAGE_API_KEY'
+    )
+
+
+def get_data_source_status(ticker='AAPL'):
+    """Return data-source diagnostics for UI troubleshooting."""
+    status = {
+        'ticker': ticker,
+        'yahoo_ok': False,
+        'alpha_key_configured': bool(_get_alpha_vantage_key()),
+        'alpha_ok': False,
+        'alpha_message': ''
+    }
+
+    try:
+        quick = yf.download(ticker, period='5d', interval='1d', progress=False, auto_adjust=False, threads=False)
+        quick = _normalize_ohlcv_columns(quick)
+        status['yahoo_ok'] = quick is not None and len(quick) > 0
+    except Exception:
+        status['yahoo_ok'] = False
+
+    if status['alpha_key_configured']:
+        alpha_df, alpha_msg = _get_data_from_alpha_vantage(ticker, interval='1d', return_debug=True)
+        status['alpha_ok'] = alpha_df is not None and len(alpha_df) > 0
+        status['alpha_message'] = alpha_msg
+
+    return status
+
+
+def _resample_to_interval(df, interval):
+    """Resample daily OHLCV data for weekly/monthly model intervals."""
+    if df is None or df.empty:
+        return df
+
+    if interval == '1wk':
+        rule = 'W-FRI'
+    elif interval == '1mo':
+        rule = 'M'
+    else:
+        return df
+
+    return df.resample(rule).agg({
+        'Open': 'first',
+        'High': 'max',
+        'Low': 'min',
+        'Close': 'last',
+        'Volume': 'sum'
+    }).dropna()
+
+
+def _extract_alpha_vantage_error(payload):
+    """Parse common Alpha Vantage error/rate-limit fields."""
+    if not isinstance(payload, dict):
+        return "Invalid response from Alpha Vantage"
+
+    for key in ['Note', 'Information', 'Error Message', 'message']:
+        msg = payload.get(key)
+        if msg:
+            return str(msg)
+    return ''
+
+
+def _get_data_from_alpha_vantage(ticker, interval='1d', return_debug=False):
+    """Fetch OHLCV data from Alpha Vantage as fallback."""
+    api_key = _get_alpha_vantage_key()
+    if not api_key:
+        return (None, "Alpha Vantage key not configured") if return_debug else None
+
+    try:
+        if interval in ['1d', '1wk', '1mo']:
+            function = 'TIME_SERIES_DAILY_ADJUSTED'
+            params = {
+                'function': function,
+                'symbol': ticker,
+                'outputsize': 'full',
+                'apikey': api_key
+            }
+            response = requests.get('https://www.alphavantage.co/query', params=params, timeout=15)
+            payload = response.json()
+            error_msg = _extract_alpha_vantage_error(payload)
+            if error_msg:
+                return (None, error_msg) if return_debug else None
+
+            series = payload.get('Time Series (Daily)', {})
+            if not series:
+                return (None, "No daily time series returned from Alpha Vantage") if return_debug else None
+
+            rows = []
+            for day, values in series.items():
+                volume_value = values.get('6. volume', values.get('5. volume', 0))
+                rows.append({
+                    'Date': pd.to_datetime(day),
+                    'Open': float(values['1. open']),
+                    'High': float(values['2. high']),
+                    'Low': float(values['3. low']),
+                    'Close': float(values['4. close']),
+                    'Volume': float(volume_value)
+                })
+
+            df = pd.DataFrame(rows).sort_values('Date').set_index('Date')
+            df = _normalize_ohlcv_columns(df)
+            if df is None or len(df) == 0:
+                return (None, "Invalid OHLCV data returned from Alpha Vantage") if return_debug else None
+
+            df = _resample_to_interval(df, interval)
+            return (df.tail(3000), "ok") if return_debug else df.tail(3000)
+
+        # Intraday fallback
+        function = 'TIME_SERIES_INTRADAY'
+        intraday_interval = '60min' if interval in ['1h', '60m'] else '30min'
+        params = {
+            'function': function,
+            'symbol': ticker,
+            'interval': intraday_interval,
+            'outputsize': 'full',
+            'apikey': api_key
+        }
+        response = requests.get('https://www.alphavantage.co/query', params=params, timeout=15)
+        payload = response.json()
+        error_msg = _extract_alpha_vantage_error(payload)
+        if error_msg:
+            return (None, error_msg) if return_debug else None
+
+        series_key = next((k for k in payload.keys() if k.startswith('Time Series')), '')
+        series = payload.get(series_key, {})
+        if not series:
+            return (None, "No intraday time series returned from Alpha Vantage") if return_debug else None
+
+        rows = []
+        for ts, values in series.items():
+            rows.append({
+                'Date': pd.to_datetime(ts),
+                'Open': float(values['1. open']),
+                'High': float(values['2. high']),
+                'Low': float(values['3. low']),
+                'Close': float(values['4. close']),
+                'Volume': float(values['5. volume'])
+            })
+
+        df = pd.DataFrame(rows).sort_values('Date').set_index('Date')
+        df = _normalize_ohlcv_columns(df)
+        if df is None or len(df) == 0:
+            return (None, "Invalid intraday OHLCV data from Alpha Vantage") if return_debug else None
+
+        return (df, "ok") if return_debug else df
+
+    except Exception as e:
+        message = f"Alpha Vantage fallback failed for {ticker}: {e}"
+        print(message)
+        return (None, message) if return_debug else None
+
 @st.cache_data(ttl=300)
 def get_data(ticker, period="2y", interval="1d"):
-    """
-    Fetch stock data with better error handling.
-    FIXED: Now handles errors properly and returns None when data unavailable.
-    """
+    """Fetch stock data with retries and resilient fallbacks."""
+    ticker = (ticker or "").strip().upper()
+    if not ticker:
+        return None
+
     try:
-        # Adjust period for intraday data
-        if interval in ['15m', '30m', '60m', '1h']: 
-            period = "60d"  # More data for better predictions
-        
-        # Download data
-        data = yf.download(ticker, period=period, interval=interval, progress=False)
-        
-        if data.empty:
-            return None
-        
-        # Fix multi-index columns
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.get_level_values(0)
-        
-        # Ensure required columns
-        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
-        if not all(col in data.columns for col in required_cols):
-            return None
-        
-        # Remove any NaN rows
-        data = data.dropna()
-        
-        return data if len(data) >= 50 else None
-        
+        if interval in ['15m', '30m', '60m', '1h']:
+            period = "60d"
+
+        # Attempt 1: yfinance download with retries
+        for _ in range(3):
+            data = yf.download(
+                ticker,
+                period=period,
+                interval=interval,
+                progress=False,
+                auto_adjust=False,
+                threads=False,
+            )
+            data = _normalize_ohlcv_columns(data)
+            if data is not None and len(data) >= 50:
+                return data
+            time.sleep(0.5)
+
+        # Attempt 2: Ticker().history fallback
+        history = yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=False)
+        history = _normalize_ohlcv_columns(history)
+        if history is not None and len(history) >= 50:
+            return history
+
+        # Attempt 3: relaxed minimum bars fallback
+        fallback_periods = ["1y", "6mo", "3mo"] if interval == "1d" else ["60d", "30d"]
+        for fallback_period in fallback_periods:
+            data = yf.download(ticker, period=fallback_period, interval=interval, progress=False, auto_adjust=False)
+            data = _normalize_ohlcv_columns(data)
+            if data is not None and len(data) >= 35:
+                return data
+
+        # Attempt 4: Alpha Vantage fallback if API key configured
+        alpha_data = _get_data_from_alpha_vantage(ticker, interval=interval)
+        alpha_data = _normalize_ohlcv_columns(alpha_data)
+        if alpha_data is not None and len(alpha_data) >= 35:
+            return alpha_data
+
+        return None
+
     except Exception as e:
         print(f"Error fetching data for {ticker}: {str(e)}")
         return None
@@ -704,6 +940,68 @@ def detect_market_regime(data):
     except:
         return "UNKNOWN"
 
+def _rule_based_fallback_prediction(data):
+    """Generate fallback signal when ML model training is unavailable."""
+    df = data.copy()
+    df['sma20'] = df['Close'].rolling(20).mean()
+    df['sma50'] = df['Close'].rolling(50).mean()
+    rsi = RSIIndicator(df['Close'], window=14).rsi().iloc[-1]
+
+    bullish_votes = 0
+    bearish_votes = 0
+
+    if df['Close'].iloc[-1] > df['sma20'].iloc[-1] > df['sma50'].iloc[-1]:
+        bullish_votes += 1
+    if df['Close'].iloc[-1] < df['sma20'].iloc[-1] < df['sma50'].iloc[-1]:
+        bearish_votes += 1
+
+    if rsi < 35:
+        bullish_votes += 1
+    elif rsi > 65:
+        bearish_votes += 1
+
+    if bullish_votes > bearish_votes:
+        signal = 'BUY'
+        buy_prob = 0.62
+        sell_prob = 0.22
+    elif bearish_votes > bullish_votes:
+        signal = 'SELL'
+        buy_prob = 0.24
+        sell_prob = 0.60
+    else:
+        signal = 'HOLD'
+        buy_prob = 0.33
+        sell_prob = 0.33
+
+    hold_prob = max(0.0, 1 - max(buy_prob, sell_prob))
+    return {
+        'signal': signal,
+        'confidence': max(buy_prob, sell_prob),
+        'probabilities': {
+            'SELL': sell_prob,
+            'BUY': buy_prob,
+            'HOLD': hold_prob
+        }
+    }
+
+
+def _calibrate_confidence(raw_confidence, regime, fundamental_score):
+    """Adjust confidence to improve robustness in unstable market regimes."""
+    adjusted = raw_confidence
+
+    if regime in ['HIGH_VOLATILITY', 'UNKNOWN']:
+        adjusted -= 0.05
+    elif regime in ['STRONG_BULL', 'STRONG_BEAR']:
+        adjusted += 0.03
+
+    if fundamental_score >= 70:
+        adjusted += 0.02
+    elif fundamental_score <= 35:
+        adjusted -= 0.02
+
+    return float(min(0.95, max(0.50, adjusted)))
+
+
 def get_multi_timeframe_predictions(ticker):
     """
     Get predictions across multiple timeframes.
@@ -711,10 +1009,10 @@ def get_multi_timeframe_predictions(ticker):
     """
     try:
         timeframes = {
-            'hourly': ('1h', '60d', 'Hourly', 0.72),
-            'daily': ('1d', '2y', 'Daily', 0.70),
-            'weekly': ('1wk', '5y', 'Weekly', 0.68),
-            'monthly': ('1mo', '10y', 'Monthly', 0.65)
+            'hourly': ('1h', '60d', 'Hourly', 0.74),
+            'daily': ('1d', '2y', 'Daily', 0.72),
+            'weekly': ('1wk', '5y', 'Weekly', 0.70),
+            'monthly': ('1mo', '10y', 'Monthly', 0.67)
         }
         
         results = {
@@ -740,12 +1038,15 @@ def get_multi_timeframe_predictions(ticker):
             
             # Train model
             model_result = train_ultimate_model(data, ticker, interval)
-            
+            fallback_pred = None
             if model_result is None:
-                continue
-            
+                fallback_pred = _rule_based_fallback_prediction(data)
+
             # Make prediction
             try:
+                if model_result is None:
+                    raise ValueError('ML model unavailable, using fallback signal')
+
                 df = create_ultimate_features(data)
                 feature_cols = model_result['feature_cols']
                 X = df[feature_cols].iloc[-1:].values
@@ -756,19 +1057,21 @@ def get_multi_timeframe_predictions(ticker):
                 proba = model_result['model'].predict_proba(X_scaled)[0]
                 
                 # Determine signal
-                if prediction == 1 and proba[1] > 0.6:
+                if prediction == 1 and proba[1] > 0.58:
                     signal = "BUY"
                     emoji = "🟢"
-                elif prediction == 0 and proba[0] > 0.6:
+                elif prediction == 0 and proba[0] > 0.58:
                     signal = "SELL"
                     emoji = "🔴"
                 else:
                     signal = "HOLD"
                     emoji = "⚪"
                 
+                calibrated_confidence = _calibrate_confidence(float(max(proba)), results['regime'], results['fundamental'])
+
                 results['predictions'][tf_key] = {
                     'signal': signal,
-                    'confidence': float(max(proba)),
+                    'confidence': calibrated_confidence,
                     'timeframe': label,
                     'emoji': emoji,
                     'accuracy': float(model_result['accuracy']),
@@ -778,9 +1081,21 @@ def get_multi_timeframe_predictions(ticker):
                         'HOLD': float(1 - max(proba))
                     }
                 }
-                
+
             except Exception as e:
                 print(f"Error predicting {tf_key}: {str(e)}")
+                if fallback_pred:
+                    fallback_conf = _calibrate_confidence(fallback_pred['confidence'], results['regime'], results['fundamental'])
+                    fallback_signal = fallback_pred['signal']
+                    fallback_emoji = '🟢' if fallback_signal == 'BUY' else '🔴' if fallback_signal == 'SELL' else '⚪'
+                    results['predictions'][tf_key] = {
+                        'signal': fallback_signal,
+                        'confidence': fallback_conf,
+                        'timeframe': label,
+                        'emoji': fallback_emoji,
+                        'accuracy': base_acc,
+                        'probabilities': fallback_pred['probabilities']
+                    }
                 continue
         
         return results if results['predictions'] else None
