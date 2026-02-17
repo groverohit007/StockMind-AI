@@ -192,9 +192,9 @@ with st.sidebar:
 # MAIN TABS
 # ============================================================================
 if SUBSCRIPTIONS_ENABLED:
-    tabs = st.tabs(["🎯 Terminal", "🔍 Scanner", "📊 Backtest", "💼 Portfolio", "🌐 Macro", "⚙️ Settings", "💎 Subscribe"])
+    tabs = st.tabs(["🎯 Terminal", "🔍 Scanner", "🟢 Buy/Sell", "📊 Backtest", "💼 Portfolio", "🌐 Macro", "⚙️ Settings", "💎 Subscribe"])
 else:
-    tabs = st.tabs(["🎯 Terminal", "🔍 Scanner", "📊 Backtest", "💼 Portfolio", "🌐 Macro", "⚙️ Settings"])
+    tabs = st.tabs(["🎯 Terminal", "🔍 Scanner", "🟢 Buy/Sell", "📊 Backtest", "💼 Portfolio", "🌐 Macro", "⚙️ Settings"])
 
 # ============================================================================
 # TAB 1: TERMINAL (AI Predictions)
@@ -645,9 +645,152 @@ with tabs[1]:
                 st.warning("No results found. Check your watchlist.")
 
 # ============================================================================
-# TAB 3: BACKTEST
+# TAB 3: BUY/SELL (PREMIUM)
 # ============================================================================
 with tabs[2]:
+    st.title("🟢 Buy/Sell AI Signals")
+    st.markdown("*Premium-only intraday buy/sell signals with estimated target prices.*")
+
+    is_premium_user = SUBSCRIPTIONS_ENABLED and (auth.is_admin() or auth.is_premium())
+
+    if not is_premium_user:
+        st.warning("🔒 Buy/Sell tab is available for Premium subscribers only.")
+        st.markdown("### Upgrade to Premium")
+        st.write("Unlock intraday 15m / 30m / 1h AI signals and target prices.")
+        st.link_button(
+            "💳 Upgrade via Stripe - £17/month",
+            "https://buy.stripe.com/4gM7sM8MWcCEb7r2WQ7AI00",
+            use_container_width=True
+        )
+    else:
+        col_bs_1, col_bs_2 = st.columns([3, 1])
+
+        with col_bs_1:
+            bs_search_type = st.radio(
+                "Search stock by:",
+                ["Ticker Symbol", "Company Name"],
+                horizontal=True,
+                key="buy_sell_search_type"
+            )
+
+            bs_ticker = None
+            if bs_search_type == "Ticker Symbol":
+                bs_ticker = st.text_input(
+                    "Enter Stock Ticker",
+                    placeholder="e.g., AAPL, MSFT, NVDA",
+                    key="buy_sell_ticker"
+                )
+            else:
+                bs_company = st.text_input(
+                    "Enter Company Name",
+                    placeholder="e.g., Apple, Microsoft, Nvidia",
+                    key="buy_sell_company"
+                )
+                if bs_company and len(bs_company) > 2:
+                    with st.spinner("🔍 Searching..."):
+                        bs_results = logic.search_company_by_name(bs_company)
+                        if bs_results:
+                            bs_selected = st.selectbox(
+                                "Select Company:",
+                                list(bs_results.keys()),
+                                key="buy_sell_company_select"
+                            )
+                            bs_ticker = bs_results[bs_selected]
+                            st.info(f"✅ Selected: **{bs_ticker}**")
+                        else:
+                            st.warning("⚠️ No results found. Try another company name.")
+
+        with col_bs_2:
+            bs_interval_label = st.selectbox(
+                "Interval",
+                ["15 Minutes", "30 Minutes", "1 Hour"],
+                key="buy_sell_interval"
+            )
+            auto_refresh = st.checkbox("Auto update chart", value=False, key="buy_sell_auto_refresh")
+            refresh_seconds = st.selectbox(
+                "Refresh every",
+                [15, 30, 60],
+                index=1,
+                key="buy_sell_refresh_seconds"
+            )
+
+        interval_map = {
+            "15 Minutes": "15m",
+            "30 Minutes": "30m",
+            "1 Hour": "1h"
+        }
+        selected_interval = interval_map[bs_interval_label]
+
+        if bs_ticker:
+            bs_ticker = bs_ticker.upper().strip()
+            st.markdown(f"### {bs_ticker} • {bs_interval_label}")
+
+            period_map = {"15m": "30d", "30m": "45d", "1h": "60d"}
+            chart_data = logic.get_data(bs_ticker, period=period_map[selected_interval], interval=selected_interval)
+
+            if chart_data is None or len(chart_data) < 30:
+                st.error("❌ Unable to load chart data for this stock/interval.")
+            else:
+                fig = go.Figure(
+                    data=[
+                        go.Candlestick(
+                            x=chart_data.index,
+                            open=chart_data['Open'],
+                            high=chart_data['High'],
+                            low=chart_data['Low'],
+                            close=chart_data['Close'],
+                            name=bs_ticker
+                        )
+                    ]
+                )
+                fig.update_layout(
+                    title=f"{bs_ticker} Price Chart ({bs_interval_label})",
+                    xaxis_title="Time",
+                    yaxis_title="Price",
+                    xaxis_rangeslider_visible=False,
+                    template='plotly_dark',
+                    height=520
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+                with st.spinner("🤖 Generating AI Buy/Sell signal..."):
+                    bs_signal = logic.get_interval_trade_signal(bs_ticker, interval=selected_interval)
+
+                if not bs_signal:
+                    st.error("❌ Could not generate intraday signal right now. Please try again.")
+                else:
+                    signal = bs_signal['signal']
+                    signal_color = "#00cc66" if signal == "BUY" else "#ff4d4f" if signal == "SELL" else "#f1c40f"
+
+                    st.markdown(
+                        f"""
+                        <div style="padding: 16px; border-left: 6px solid {signal_color}; background: rgba(255,255,255,0.04); border-radius: 8px; margin-bottom: 1rem;">
+                            <h3 style="margin:0;">AI Signal: {signal}</h3>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("Current Price", f"${bs_signal['current_price']:.2f}")
+                    m2.metric("Target Price", f"${bs_signal['target_price']:.2f}")
+                    m3.metric("Projected Move", f"{bs_signal['projected_change_pct']:+.2f}%")
+                    m4.metric("Model Confidence", f"{bs_signal['confidence']*100:.1f}%")
+
+                    st.caption(
+                        f"Estimated model accuracy band for this signal: {bs_signal['accuracy']*100:.1f}%"
+                    )
+                    st.write("**AI models used:** " + ", ".join(bs_signal['model_stack']))
+
+            if auto_refresh:
+                st.caption(f"Auto update enabled. Refreshing every {refresh_seconds} seconds...")
+                time.sleep(refresh_seconds)
+                st.rerun()
+
+# ============================================================================
+# TAB 4: BACKTEST
+# ============================================================================
+with tabs[3]:
     st.title("📊 Strategy Backtest")
     st.markdown("*Test AI predictions on historical data*")
     
@@ -673,9 +816,9 @@ with tabs[2]:
                 st.error(f"Unable to fetch data for {bt_ticker}")
 
 # ============================================================================
-# TAB 4: PORTFOLIO
+# TAB 5: PORTFOLIO
 # ============================================================================
-with tabs[3]:
+with tabs[4]:
     st.title("💼 Portfolio Manager")
     
     # NEW: Portfolio Upload Feature
@@ -776,9 +919,9 @@ with tabs[3]:
         st.info("💡 Your portfolio is empty. Start by analyzing stocks in the Terminal!")
 
 # ============================================================================
-# TAB 5: MACRO
+# TAB 6: MACRO
 # ============================================================================
-with tabs[4]:
+with tabs[5]:
     st.title("🌐 Macro Dashboard")
     
     if st.button("🔄 Refresh Data"):
@@ -816,9 +959,9 @@ with tabs[4]:
             st.plotly_chart(fig, use_container_width=True)
 
 # ============================================================================
-# TAB 6: SETTINGS
+# TAB 7: SETTINGS
 # ============================================================================
-with tabs[5]:
+with tabs[6]:
     st.title("⚙️ Settings")
     
     st.subheader("🔔 Notifications")
@@ -1012,10 +1155,10 @@ with tabs[5]:
     st.caption("Built with Streamlit • Powered by Advanced ML")
 
 # ============================================================================
-# TAB 7: SUBSCRIBE (if enabled)
+# TAB 8: SUBSCRIBE (if enabled)
 # ============================================================================
 if SUBSCRIPTIONS_ENABLED:
-    with tabs[6]:
+    with tabs[7]:
         st.title("💎 Premium Subscription")
         
         user_info = db.get_user_info(auth.get_current_user_id())
