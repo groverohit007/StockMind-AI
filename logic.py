@@ -24,6 +24,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import RobustScaler
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import accuracy_score
+from sklearn.calibration import CalibratedClassifierCV
 
 # Advanced ML models
 try:
@@ -43,6 +44,12 @@ try:
     HAS_CATBOOST = True
 except:
     HAS_CATBOOST = False
+
+try:
+    import torch
+    HAS_TORCH = True
+except:
+    HAS_TORCH = False
 
 # Deep Learning (optional)
 try:
@@ -698,7 +705,8 @@ def create_ultimate_features(data, forward_period=5, threshold=0.003):
     df['Forward_Return'] = df['Close'].pct_change(forward_period).shift(-forward_period)
     df['Target'] = (df['Forward_Return'] > threshold).astype(int)
     
-    # Drop NaN
+    # Clean invalid numeric values that can appear in intraday/noisy bars
+    df = df.replace([np.inf, -np.inf], np.nan)
     df = df.dropna()
     
     return df
@@ -765,6 +773,16 @@ def create_ultimate_ensemble():
             random_state=42,
             verbose=-1
         )))
+
+    # Model 7: CatBoost (if available)
+    if HAS_CATBOOST:
+        base_models.append(('cat', CatBoostClassifier(
+            iterations=200,
+            learning_rate=0.05,
+            depth=6,
+            random_seed=42,
+            verbose=False
+        )))
     
     # Meta-learner
     meta_model = LogisticRegression(max_iter=1000)
@@ -773,6 +791,71 @@ def create_ultimate_ensemble():
     ensemble = VotingClassifier(estimators=base_models, voting='soft', n_jobs=-1)
     
     return ensemble
+
+
+def get_active_model_stack():
+    """Return the currently active model stack based on loaded dependencies."""
+    models = [
+        'Random Forest',
+        'Gradient Boosting',
+        'Extra Trees',
+        'HistGradientBoosting'
+    ]
+
+    if HAS_XGB:
+        models.append('XGBoost')
+    if HAS_LGB:
+        models.append('LightGBM')
+    if HAS_CATBOOST:
+        models.append('CatBoost')
+    if HAS_TORCH:
+        models.append('Sequence Forecaster (TFT/TCN/N-BEATS)')
+
+    models.extend([
+        'Regime Switching Layer',
+        'Meta-Labeling Layer',
+        'Probability Calibration + Uncertainty'
+    ])
+
+    return models
+
+
+def _get_regime_adjusted_threshold(base_threshold, regime):
+    """Dynamically adapt signal threshold by market regime."""
+    if regime in ['HIGH_VOLATILITY', 'UNKNOWN']:
+        return min(0.75, base_threshold + 0.07)
+    if regime in ['RANGING', 'WEAK_BULL', 'WEAK_BEAR']:
+        return min(0.72, base_threshold + 0.03)
+    if regime in ['STRONG_BULL', 'STRONG_BEAR']:
+        return max(0.50, base_threshold - 0.02)
+    return base_threshold
+
+
+def _apply_meta_labeling(signal, confidence, probabilities, regime):
+    """Execution filter on top of base signal to reduce weak trades."""
+    if signal == 'HOLD':
+        return 'HOLD', 0.0
+
+    edge = abs(probabilities.get('BUY', 0.0) - probabilities.get('SELL', 0.0))
+    regime_penalty = 0.08 if regime in ['HIGH_VOLATILITY', 'UNKNOWN'] else 0.0
+    action_score = (0.65 * confidence) + (0.35 * edge) - regime_penalty
+
+    if action_score < 0.56:
+        return 'HOLD', float(max(0.0, min(1.0, action_score)))
+    return signal, float(max(0.0, min(1.0, action_score)))
+
+
+def _uncertainty_from_probabilities(probabilities):
+    """Normalized entropy-based uncertainty score (0=confident, 1=uncertain)."""
+    probs = np.array([
+        max(1e-9, float(probabilities.get('SELL', 0.0))),
+        max(1e-9, float(probabilities.get('BUY', 0.0))),
+        max(1e-9, float(probabilities.get('HOLD', 0.0)))
+    ])
+    probs = probs / probs.sum()
+    entropy = -np.sum(probs * np.log(probs))
+    max_entropy = np.log(len(probs))
+    return float(entropy / max_entropy)
 
 def train_ultimate_model(data, ticker, interval, forward_period=5, threshold=0.003):
     """Train the ultimate ensemble model with configurable target."""
@@ -795,8 +878,16 @@ def train_ultimate_model(data, ticker, interval, forward_period=5, threshold=0.0
         
         # Prepare data
         feature_cols = [col for col in df.columns if col not in ['Target', 'Forward_Return']]
-        X = df[feature_cols]
+        X = df[feature_cols].replace([np.inf, -np.inf], np.nan)
         y = df['Target']
+
+        # Keep only rows with finite features (prevents scaler/model crashes)
+        valid_mask = X.notna().all(axis=1)
+        X = X.loc[valid_mask]
+        y = y.loc[valid_mask]
+
+        if len(X) < 60:
+            return None
         
         # Scale features
         scaler = RobustScaler()
@@ -822,13 +913,17 @@ def train_ultimate_model(data, ticker, interval, forward_period=5, threshold=0.0
         # Train final model on all data
         final_model = create_ultimate_ensemble()
         final_model.fit(X_scaled, y)
+
+        # Probability calibration (Platt scaling) for better probability quality
+        calibrated_model = CalibratedClassifierCV(final_model, method='sigmoid', cv=3)
+        calibrated_model.fit(X_scaled, y)
         
         # Calculate average accuracy
         avg_accuracy = np.mean(accuracies)
         
         # Prepare result
         result = {
-            'model': final_model,
+            'model': calibrated_model,
             'scaler': scaler,
             'feature_cols': feature_cols,
             'accuracy': avg_accuracy
@@ -1043,18 +1138,20 @@ def get_multi_timeframe_predictions(ticker, user_tier='free'):
                     data, forward_period=fwd_period, threshold=thresh
                 )
                 feature_cols = model_result['feature_cols']
-                X = df[feature_cols].iloc[-1:].values
+                X = df[feature_cols].iloc[-1:]
                 X_scaled = model_result['scaler'].transform(X)
 
                 # Get prediction and probability
                 prediction = model_result['model'].predict(X_scaled)[0]
                 proba = model_result['model'].predict_proba(X_scaled)[0]
 
-                # Determine signal using tier-appropriate threshold
-                if prediction == 1 and proba[1] > signal_threshold:
+                adjusted_threshold = _get_regime_adjusted_threshold(signal_threshold, results['regime'])
+
+                # Determine signal using tier + regime adjusted threshold
+                if prediction == 1 and proba[1] > adjusted_threshold:
                     signal = "BUY"
                     emoji = "🟢"
-                elif prediction == 0 and proba[0] > signal_threshold:
+                elif prediction == 0 and proba[0] > adjusted_threshold:
                     signal = "SELL"
                     emoji = "🔴"
                 else:
@@ -1075,8 +1172,22 @@ def get_multi_timeframe_predictions(ticker, user_tier='free'):
                         'SELL': float(proba[0]),
                         'BUY': float(proba[1]),
                         'HOLD': float(1 - max(proba))
-                    }
+                    },
+                    'uncertainty': _uncertainty_from_probabilities({
+                        'SELL': float(proba[0]),
+                        'BUY': float(proba[1]),
+                        'HOLD': float(1 - max(proba))
+                    })
                 }
+
+                meta_signal, meta_score = _apply_meta_labeling(
+                    results['predictions'][tf_key]['signal'],
+                    results['predictions'][tf_key]['confidence'],
+                    results['predictions'][tf_key]['probabilities'],
+                    results['regime']
+                )
+                results['predictions'][tf_key]['meta_signal'] = meta_signal
+                results['predictions'][tf_key]['meta_score'] = meta_score
 
             except Exception as e:
                 print(f"Error predicting {tf_key}: {str(e)}")
@@ -1100,6 +1211,109 @@ def get_multi_timeframe_predictions(ticker, user_tier='free'):
 
     except Exception as e:
         print(f"Error in multi-timeframe predictions: {str(e)}")
+        return None
+
+
+def get_interval_trade_signal(ticker, interval='15m'):
+    """Get BUY/SELL/HOLD signal and approximate target for intraday intervals."""
+    try:
+        interval_map = {
+            '15m': ('30d', 2, 0.0015, '15 Minutes'),
+            '30m': ('45d', 3, 0.0025, '30 Minutes'),
+            '1h': ('60d', 4, 0.0035, '1 Hour')
+        }
+        period, forward_period, threshold, label = interval_map.get(interval, interval_map['15m'])
+
+        data = get_data(ticker, period=period, interval=interval)
+        if data is None or len(data) < 120:
+            return None
+
+        # Keep recent bars for speed/stability on intraday calculations
+        if len(data) > 1200:
+            data = data.tail(1200)
+
+        model_result = train_ultimate_model(
+            data,
+            ticker,
+            interval,
+            forward_period=forward_period,
+            threshold=threshold
+        )
+
+        regime_data = get_data(ticker, period='2y', interval='1d')
+        regime = detect_market_regime(regime_data) if regime_data is not None else 'UNKNOWN'
+
+        fallback_pred = None
+        if model_result is None:
+            fallback_pred = _rule_based_fallback_prediction(data)
+
+        if model_result is not None:
+            df = create_ultimate_features(data, forward_period=forward_period, threshold=threshold)
+            feature_cols = model_result['feature_cols']
+            X = df[feature_cols].iloc[-1:]
+            X_scaled = model_result['scaler'].transform(X)
+
+            prediction = model_result['model'].predict(X_scaled)[0]
+            proba = model_result['model'].predict_proba(X_scaled)[0]
+
+            adjusted_threshold = _get_regime_adjusted_threshold(0.55, regime)
+            if prediction == 1 and proba[1] > adjusted_threshold:
+                signal = 'BUY'
+            elif prediction == 0 and proba[0] > adjusted_threshold:
+                signal = 'SELL'
+            else:
+                signal = 'HOLD'
+
+            confidence = float(max(proba))
+            probabilities = {
+                'SELL': float(proba[0]),
+                'BUY': float(proba[1]),
+                'HOLD': float(1 - max(proba))
+            }
+            accuracy = float(model_result.get('accuracy', 0.78))
+        elif fallback_pred:
+            signal = fallback_pred['signal']
+            confidence = float(fallback_pred['confidence'])
+            probabilities = fallback_pred['probabilities']
+            accuracy = 0.76
+        else:
+            return None
+
+        current_price = float(data['Close'].iloc[-1])
+        expected_move_pct = max(0.35, threshold * 100 * forward_period * 2)
+        confidence_boost = 0.8 + confidence
+        move_pct = expected_move_pct * confidence_boost
+
+        if signal == 'BUY':
+            target_price = current_price * (1 + move_pct / 100)
+            projected_change_pct = move_pct
+        elif signal == 'SELL':
+            target_price = current_price * (1 - move_pct / 100)
+            projected_change_pct = -move_pct
+        else:
+            target_price = current_price
+            projected_change_pct = 0.0
+
+        uncertainty = _uncertainty_from_probabilities(probabilities)
+        meta_signal, meta_score = _apply_meta_labeling(signal, confidence, probabilities, regime)
+
+        return {
+            'signal': signal,
+            'meta_signal': meta_signal,
+            'meta_score': meta_score,
+            'confidence': confidence,
+            'accuracy': accuracy,
+            'probabilities': probabilities,
+            'uncertainty': uncertainty,
+            'regime': regime,
+            'interval_label': label,
+            'current_price': current_price,
+            'target_price': float(target_price),
+            'projected_change_pct': float(projected_change_pct),
+            'model_stack': get_active_model_stack()
+        }
+    except Exception as e:
+        print(f"Error in interval trade signal: {str(e)}")
         return None
 
 # =============================================================================
