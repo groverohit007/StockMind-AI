@@ -229,6 +229,17 @@ with tabs[0]:
             st.write("• Ticker symbol may be incorrect")
             st.write("• Market might be closed")
             st.write("• Try: MSFT, GOOGL, TSLA, NVDA")
+
+            with st.expander("🛠️ Data source diagnostics", expanded=False):
+                status = logic.get_data_source_status(ticker)
+                st.write(f"**Yahoo Finance reachable:** {'✅' if status['yahoo_ok'] else '❌'}")
+                st.write(f"**Alpha Vantage key configured:** {'✅' if status['alpha_key_configured'] else '❌'}")
+                if status['alpha_key_configured']:
+                    st.write(f"**Alpha Vantage data fetch:** {'✅' if status['alpha_ok'] else '❌'}")
+                    if status.get('alpha_message'):
+                        st.caption(f"Alpha Vantage message: {status['alpha_message']}")
+
+                st.warning("If Alpha Vantage shows a rate-limit note, wait 60 seconds and try again. Free plans are throttled.")
             st.stop()
         
         # Make AI Predictions
