@@ -1126,10 +1126,6 @@ def get_interval_trade_signal(ticker, interval='15m'):
         if data is None or len(data) < 120:
             return None
 
-        # Keep recent bars for speed/stability on intraday calculations
-        if len(data) > 1200:
-            data = data.tail(1200)
-
         model_result = train_ultimate_model(
             data,
             ticker,
@@ -1145,7 +1141,7 @@ def get_interval_trade_signal(ticker, interval='15m'):
         if model_result is not None:
             df = create_ultimate_features(data, forward_period=forward_period, threshold=threshold)
             feature_cols = model_result['feature_cols']
-            X = df[feature_cols].iloc[-1:]
+            X = df[feature_cols].iloc[-1:].values
             X_scaled = model_result['scaler'].transform(X)
 
             prediction = model_result['model'].predict(X_scaled)[0]
