@@ -239,6 +239,15 @@ with tabs[0]:
                     if status.get('alpha_message'):
                         st.caption(f"Alpha Vantage message: {status['alpha_message']}")
 
+                if not status['alpha_key_configured']:
+                    st.info(
+                        "**To configure Alpha Vantage** (fallback data source):\n"
+                        "- Set the `ALPHA_VANTAGE_API_KEY` env var in Streamlit Cloud Secrets, **or**\n"
+                        "- Enter the key in the **Settings > API configuration** tab (admin only)\n\n"
+                        "Get a free key at https://www.alphavantage.co/support/#api-key\n\n"
+                        "Note: GitHub Actions secrets do **not** apply here."
+                    )
+
                 st.warning("If Alpha Vantage shows a rate-limit note, wait 60 seconds and try again. Free plans are throttled.")
             st.stop()
         
@@ -799,35 +808,67 @@ with tabs[5]:
         with st.expander("🧩 API configuration", expanded=True):
             existing_settings = db.get_app_settings()
 
-            # Check which keys are already in secrets.toml
-            def _check_secret(section, key='api_key'):
+            # Check which keys are already provided via env vars or secrets.toml
+            def _key_source(env_vars, section, secret_key='api_key', db_key=None):
+                """Return the source name if the key is already configured, else None."""
+                for var in env_vars:
+                    if os.getenv(var, '').strip():
+                        return f"environment variable ({var})"
                 try:
-                    return bool(st.secrets.get(section, {}).get(key, '').strip())
+                    if st.secrets.get(section, {}).get(secret_key, '').strip():
+                        return "secrets.toml / Streamlit Cloud secrets"
                 except Exception:
-                    return False
+                    pass
+                if db_key and existing_settings.get(db_key, '').strip():
+                    return "admin settings (database)"
+                return None
 
-            alpha_in_secrets = _check_secret('alpha_vantage')
-            news_in_secrets = _check_secret('news')
-            openai_in_secrets = _check_secret('openai')
+            alpha_source = _key_source(['ALPHA_VANTAGE_API_KEY'], 'alpha_vantage', db_key='alpha_vantage_api_key')
+            news_source = _key_source(['NEWS_API_KEY'], 'news', db_key='news_api_key')
+            openai_source = _key_source(['OPENAI_API_KEY', 'OPENAI_KEY'], 'openai', db_key='openai_api_key')
+
+            st.info(
+                "**Where to configure API keys** (checked in order):\n"
+                "1. **Environment variables** — set in Streamlit Cloud (Settings > Secrets as `KEY=value`) or your hosting platform\n"
+                "2. **Streamlit secrets.toml** — add via Streamlit Cloud dashboard or `.streamlit/secrets.toml` file\n"
+                "3. **Admin settings below** — saved in the app database\n\n"
+                "⚠️ **GitHub Actions secrets** (repo > Settings > Secrets > Actions) are only available "
+                "to GitHub Actions workflows. They do **not** apply to Streamlit Cloud deployments."
+            )
 
             with st.form("admin_api_settings_form"):
-                if alpha_in_secrets:
-                    st.info("**Alpha Vantage API Key:** Already in secrets.toml")
+                if alpha_source:
+                    st.success(f"**Alpha Vantage API Key:** Configured via {alpha_source}")
                     alpha_vantage_key = None
                 else:
-                    alpha_vantage_key = st.text_input("Alpha Vantage API Key", value=existing_settings.get("alpha_vantage_api_key", ""), type="password")
+                    alpha_vantage_key = st.text_input(
+                        "Alpha Vantage API Key",
+                        value=existing_settings.get("alpha_vantage_api_key", ""),
+                        type="password",
+                        help="Get a free key at https://www.alphavantage.co/support/#api-key"
+                    )
 
-                if news_in_secrets:
-                    st.info("**News API Key:** Already in secrets.toml")
+                if news_source:
+                    st.success(f"**News API Key:** Configured via {news_source}")
                     news_api_key = None
                 else:
-                    news_api_key = st.text_input("News API Key", value=existing_settings.get("news_api_key", ""), type="password")
+                    news_api_key = st.text_input(
+                        "News API Key",
+                        value=existing_settings.get("news_api_key", ""),
+                        type="password",
+                        help="Get a free key at https://newsapi.org/register"
+                    )
 
-                if openai_in_secrets:
-                    st.info("**OpenAI API Key:** Already in secrets.toml")
+                if openai_source:
+                    st.success(f"**OpenAI API Key:** Configured via {openai_source}")
                     openai_api_key = None
                 else:
-                    openai_api_key = st.text_input("OpenAI API Key", value=existing_settings.get("openai_api_key", ""), type="password")
+                    openai_api_key = st.text_input(
+                        "OpenAI API Key",
+                        value=existing_settings.get("openai_api_key", ""),
+                        type="password",
+                        help="Get a key at https://platform.openai.com/api-keys"
+                    )
 
                 save_apis = st.form_submit_button("Save API settings")
 
@@ -841,9 +882,10 @@ with tabs[5]:
                         save_results.append(db.set_app_setting("openai_api_key", openai_api_key.strip()))
 
                     if not save_results:
-                        st.info("All API keys are managed via secrets.toml")
+                        st.info("All API keys are managed via environment variables or secrets.toml")
                     elif all(save_results):
                         st.success("✅ API settings saved")
+                        st.rerun()
                     else:
                         st.error("❌ Failed saving one or more API settings")
 
