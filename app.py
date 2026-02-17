@@ -231,28 +231,11 @@ with tabs[0]:
             st.write("• Try: MSFT, GOOGL, TSLA, NVDA")
 
             with st.expander("🛠️ Data source diagnostics", expanded=False):
-                default_status = {
-                    'yahoo_ok': False,
-                    'alpha_key_configured': False,
-                    'alpha_ok': False,
-                    'alpha_message': ''
-                }
-
-                try:
-                    diagnostics_fn = getattr(logic, 'get_data_source_status', None)
-                    if callable(diagnostics_fn):
-                        status = diagnostics_fn(ticker)
-                    else:
-                        status = default_status
-                        st.caption("Diagnostics helper not available in current deployment build.")
-                except Exception as diag_err:
-                    status = default_status
-                    st.caption(f"Diagnostics temporarily unavailable: {diag_err}")
-
-                st.write(f"**Yahoo Finance reachable:** {'✅' if status.get('yahoo_ok') else '❌'}")
-                st.write(f"**Alpha Vantage key configured:** {'✅' if status.get('alpha_key_configured') else '❌'}")
-                if status.get('alpha_key_configured'):
-                    st.write(f"**Alpha Vantage data fetch:** {'✅' if status.get('alpha_ok') else '❌'}")
+                status = logic.get_data_source_status(ticker)
+                st.write(f"**Yahoo Finance reachable:** {'✅' if status['yahoo_ok'] else '❌'}")
+                st.write(f"**Alpha Vantage key configured:** {'✅' if status['alpha_key_configured'] else '❌'}")
+                if status['alpha_key_configured']:
+                    st.write(f"**Alpha Vantage data fetch:** {'✅' if status['alpha_ok'] else '❌'}")
                     if status.get('alpha_message'):
                         st.caption(f"Alpha Vantage message: {status['alpha_message']}")
 
@@ -803,21 +786,12 @@ with tabs[5]:
                         st.error("❌ Failed to update password")
 
         with st.expander("🧩 API configuration", expanded=True):
-            st.caption("Primary source is .streamlit/secrets.toml (env vars also supported). DB values are fallback only.")
-
-            # Show effective key status resolved from env/secrets/DB
-            key_status = logic.get_api_key_status()
-            st.write(f"Alpha Vantage: {'✅ Configured' if key_status['alpha_vantage'] else '❌ Missing'}")
-            st.write(f"News API: {'✅ Configured' if key_status['newsapi'] else '❌ Missing'}")
-            st.write(f"OpenAI API: {'✅ Configured' if key_status['openai'] else '❌ Missing'}")
-
             existing_settings = db.get_app_settings()
             with st.form("admin_api_settings_form"):
-                st.write("Optional fallback values (used only if secrets/env are missing):")
-                alpha_vantage_key = st.text_input("Alpha Vantage API Key (fallback)", value=existing_settings.get("alpha_vantage_api_key", ""), type="password")
-                news_api_key = st.text_input("News API Key (fallback)", value=existing_settings.get("news_api_key", ""), type="password")
-                openai_api_key = st.text_input("OpenAI API Key (fallback)", value=existing_settings.get("openai_api_key", ""), type="password")
-                save_apis = st.form_submit_button("Save fallback API settings")
+                alpha_vantage_key = st.text_input("Alpha Vantage API Key", value=existing_settings.get("alpha_vantage_api_key", ""), type="password")
+                news_api_key = st.text_input("News API Key", value=existing_settings.get("news_api_key", ""), type="password")
+                openai_api_key = st.text_input("OpenAI API Key", value=existing_settings.get("openai_api_key", ""), type="password")
+                save_apis = st.form_submit_button("Save API settings")
 
                 if save_apis:
                     ok = all([
@@ -826,9 +800,9 @@ with tabs[5]:
                         db.set_app_setting("openai_api_key", openai_api_key.strip())
                     ])
                     if ok:
-                        st.success("✅ Fallback API settings saved")
+                        st.success("✅ API settings saved")
                     else:
-                        st.error("❌ Failed saving one or more fallback settings")
+                        st.error("❌ Failed saving one or more API settings")
 
         with st.expander("📧 User emails (marketing list)", expanded=True):
             emails = db.get_all_user_emails()
